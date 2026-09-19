@@ -127,12 +127,12 @@ ST77xx_t MyDisplay = {
 
 FAT_Instance_t SD_FAT;
 
-void MyW25Q_Read_For_FAT(uint8_t* buffer, uint32_t phys_address, uint32_t length) {
+void SD_Read_For_FAT(uint8_t* buffer, uint32_t phys_address, uint32_t length) {
     // Вызываем вашу реальную функцию чтения низкого уровня
     SDIO_ReadBlock_DMA(phys_address, (uint32_t*)buffer);
 }
 
-void MyW25Q_Write_For_FAT(uint8_t* buffer, uint32_t phys_address, uint32_t length) {
+void SD_Write_For_FAT(uint8_t* buffer, uint32_t phys_address, uint32_t length) {
 	// Находим физический адрес начала 4 КБ сектора флешки (округляем вниз до 4096)
 	uint32_t flash_sector_address = phys_address & 0xFFFFF000;
 		
@@ -197,6 +197,8 @@ int main(void){
 	USART_Configure();
 	
 	SDIO_Init();
+
+	
 	
 	char test_msg[128];
 
@@ -232,6 +234,9 @@ int main(void){
 
 				if(sd_status == 0){
 					SDIO_Switch_To_High_Speed();
+
+					SD_FAT.disk_read = SD_Read_For_FAT;
+					SD_FAT.disk_write = SD_Write_For_FAT;
 						
 					FAT_Mount(&SD_FAT);
 					
