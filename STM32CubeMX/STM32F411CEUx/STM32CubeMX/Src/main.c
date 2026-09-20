@@ -318,7 +318,6 @@ int main(void){
 			}
 			data_available = 0;
 		}
-		
 	}
 
 }
