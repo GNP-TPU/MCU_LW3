@@ -10,85 +10,122 @@ typedef enum {
     FAT_TYPE_UNKNOWN = 0,
     FAT_TYPE_12,
     FAT_TYPE_16,
+    FAT_TYPE_12_16,
     FAT_TYPE_32,
     FAT_TYPE_EX       // exFAT
 } FAT_Type_t;
 
-typedef void (*FAT_ReadFunc_t)(uint8_t* buffer, uint32_t phys_address, uint32_t length);
-typedef void (*FAT_WriteFunc_t)(uint8_t* buffer, uint32_t phys_address, uint32_t length);
+typedef void (*FAT_ReadFunc_t)(uint32_t sector_address, uint8_t* buffer);
+typedef void (*FAT_WriteFunc_t)(uint32_t sector_address, uint8_t* buffer);
 
 typedef struct {
-    /* --- Базовый BPB (смещение от 11-го байта, длина 25 байт) --- */
-    uint16_t bytes_per_sector;     // [11-12] Байт в секторе (обычно 512)
-    uint8_t  sectors_per_cluster;  // [13]    Секторов в кластере (у вас 8)
-    uint16_t reserved_sectors;     // [14-15] Резервные сектора (обычно 1)
-    uint8_t  num_fats;             // [16]    Количество таблиц FAT (обычно 2)
-    uint16_t root_entry_count;     // [17-18] Макс. записей в корне (для FAT32 всегда 0)
-    uint16_t total_sectors_16;     // [19-20] Всего секторов, если объем < 32МБ
-    uint8_t  media_descriptor;     // [21]    Тип носителя (0xF8 для флешек)
-    uint16_t sectors_per_fat_16;   // [22-23] Секторов на одну FAT (для FAT32 всегда 0)
-    uint16_t sectors_per_track;    // [24-25] Секторов на дорожку (для флешек зануляется)
-    uint16_t num_heads;            // [26-27] Количество головок (для флешек зануляется)
-    uint32_t hidden_sectors;       // [28-31] Скрытые сектора (LBA начала раздела)
-    uint32_t total_sectors_32;     // [32-35] Всего секторов, если объем >= 32МБ
+    FAT_ReadFunc_t      DiskRead;
+    FAT_WriteFunc_t     DiskWrite;
 
-    /* --- Расширение для FAT32 (начинается с 36-го байта) --- */
-    union {
-        // Если ФС определена как FAT12 или FAT16
-        struct __attribute__((packed)){
-            uint8_t  drive_number;      // [36] Номер диска для BIOS
-            uint8_t  reserved1;         // [37] Резерв
-            uint8_t  boot_signature;    // [38] Сигнатура расширения (0x29)
-            uint32_t volume_id;         // [39-42] Серийный номер тома
-            uint8_t  volume_label[11];  // [43-53] Метка тома (у вас "NO NAME    ")
-            uint8_t  fs_type[8];        // [54-61] Строка типа ФС ("FAT12   ")
-        } fat12_16;
-
-        // Если ФС определена как FAT32 (расширяет структуру до 64 байта)
-        struct __attribute__((packed)){
-            uint32_t sectors_per_fat_32;// [36-39] Секторов на одну FAT32
-            uint16_t ext_flags;         // [40-41] Флаги зеркалирования FAT
-            uint16_t fs_version;        // [42-43] Версия ФС
-            uint32_t root_cluster;      // [44-47] Номер первого кластера Root Dir (обычно 2)
-            uint16_t fs_info_sector;    // [48-49] Сектор со служебной инфой FSINFO
-            uint16_t backup_boot_sector;// [50-51] Сектор с копией Boot-сектора
-            uint8_t  reserved2[12];     // [52-63] Зарезервировано
-        } fat32;
-    } __attribute__((packed)) ext;
+    FAT_Type_t          FAT_Type;
+    /*
+    |Type|      |Field name|            | Offset    | Size (bytes) |
+    */
+    uint8_t     JumpBoot[3];            // [0]      | 3 
+    uint8_t     OEMName[8];             // [3]      | 8
+    uint16_t    BytesPerSector;         // [11]     | 2
+    uint8_t     SectorsPerCluster;      // [13]     | 1
+    uint16_t    ReservedSectorsCount;   // [14]     | 2
+    uint8_t     NumFATs;                // [16]     | 1
+    uint16_t    RootEntriesCount;       // [17]     | 2     // FAT32 value 0
     
-} __attribute__((packed, aligned(4))) FAT_BPB_t;
+    uint8_t     MediaDescriptor;        // [21]     | 1
+    
+    uint16_t    SectorsPerTrack;        // [24]     | 2
+    uint16_t    NumHeads;               // [26]     | 2
+    uint32_t    HiddenSectors;          // [28]     | 4
+    
 
-typedef struct {
-    uint32_t fat1_addr;         // Физический адрес начала таблицы FAT1
-    uint32_t fat2_addr;         // Физический адрес начала таблицы FAT2
-    uint32_t root_dir_addr;     // Физический адрес начала Корневого Каталога
-    uint32_t root_dir_sectors;  // Сколько секторов занимает каталог
-    uint32_t data_addr;         // Физический адрес начала Области Данных (Кластер #2)
-} FAT_Map_t;
+    uint16_t    Sign;                   // [510]    | 2     // Always 0xAA55
 
-typedef struct {
-    FAT_ReadFunc_t  disk_read; // [HAL-слой] У каждого диска здесь будет СВОЯ функция чтения
-    FAT_WriteFunc_t disk_write;
-    FAT_Type_t      type;      // Тип файловой системы (FAT12, FAT16, FAT32)
-    FAT_BPB_t       bpb;       // Ваша структура BPB (память под неё выделяется для каждого диска отдельно!)
-    FAT_Map_t       flash_map; // Ваша карта адресов (тоже своя для каждого диска)
+    union{
+        struct __attribute__((packed)){
+            uint16_t    TotalSectors16;         // [19]     | 2     // FAT32 value 0, > 0xFFFF used TotalSectors32
+            uint16_t    FAT_Size_16;            // [22]     | 2     // FAT32 value 0, refer to FAT_Size_32
 
-    uint32_t current_file_cluster; // Стартовый кластер найденного файла
-    uint32_t current_file_size;    // Реальный размер файла в байтах
-    bool     is_file_open;         // Флаг: успешно ли найден и открыт файл
+            uint8_t     DrvNumber;              // [36]     | 1
+            uint8_t     BS_Reserved;            // [37]     | 1
+            uint8_t     BootSignature;          // [38]     | 1     // Extended boot signature 0x29, indicates that the following 3 fields are present;
+            uint32_t    VolID;                  // [39]     | 4
+            uint8_t     VolLabel[11];           // [43]     | 11    // Volume label
+            uint8_t     FileSystemType[8];      // [54]     | 8     // Not defines FAT type        
+        } FAT12_16;
 
-    uint32_t current_file_position; // Текущая позиция чтения в байтах (от 0 до file_size)
-    uint32_t current_cluster_pointer;// Кластер, в котором мы сейчас находимся
+        struct __attribute__((packed)){
+            uint32_t    TotalSectors32;         // [32]     | 4     // FAT32 valid value, < 0x10000 used TotalSectors16
+            uint32_t    FAT_Size_32;            // [36]     | 4     //  FAT32 value 0, refer to FAT_Size_32
 
-    uint8_t  current_file_attr;  // Сюда запишется атрибут (0x10 для папки, 0x20 для файла)
-    uint32_t current_dir_cluster;     // КЛЮЧЕВОЙ МАРКЕР: 0 - корень, иначе - кластер текущей папки
+            uint16_t    ExtFlags;               // [40]     | 2     //  Bit3-0: Active FAT starting from 0. Valid when bit7 is 1.
+                                                                    //  Bit6-4: Reserved (0).
+                                                                    //  Bit7:   0 means that each FAT are active and mirrored. 
+                                                                    //          1 means that only one FAT indicated by bit3-0 is active.
+                                                                    //  Bit15-8-4: Reserved (0).
+            uint16_t    FSVersion;              // [42]     | 2     // FAT32 version
+            uint32_t    RootCluster;            // [44]     | 4     // First cluster number
+            uint16_t    FSInfo;                 // [48]     | 2     // Sector of FSInfo structer
+            uint16_t    BackupBootSector;       // [50]     | 2     // Sector of backup boot sector
 
-    uint32_t current_file_entry_addr; // Физический адрес 32-байтного DOS-паспорта файла на W25Q
-} FAT_Instance_t;
+            uint8_t     DrvNumber;              // [64]     | 1
+            uint8_t     BS_Reserved;            // [65]     | 1
+            uint8_t     BootSignature;          // [66]     | 1     // Extended boot signature 0x29, indicates that the following 3 fields are present;
+            uint32_t    VolID;                  // [67]     | 4
+            uint8_t     VolLabel[11];           // [71]     | 11    // Volume label
+            uint8_t     FileSystemType[8];      // [82]     | 8     // Not defines FAT type        
+        } FAT32;
 
-uint8_t     FAT_Mount(FAT_Instance_t* instance);
-uint8_t     FAT_OpenFile(FAT_Instance_t* instance, const char* file_name);
-uint32_t    FAT_ReadFileData(FAT_Instance_t* instance, uint8_t* out_buffer, uint32_t start_byte, uint32_t bytes_to_read);
-uint32_t    FAT_WriteFileData(FAT_Instance_t* instance, const uint8_t* in_buffer, uint32_t start_byte, uint32_t bytes_to_write);
+        struct __attribute__((packed)){
+            /*TODO*/
+        } EXFAT;
+
+    } __attribute__((packed)) FAT;
+
+    uint32_t FAT_TotalSectors;
+
+    uint32_t FAT_StartSector;
+    uint32_t FAT_StartAddress;
+    uint32_t FAT_NumSectors;
+
+    uint32_t RootDirectoryStartSector;
+
+    uint32_t DataSectors;
+    uint32_t CountOfClusters;
+
+
+
+} __attribute__((packed, aligned(4))) FATmini_t;
+
+
+
+typedef struct __attribute__((packed)) {
+    /* --- Заголовок файла (BITMAPFILEHEADER — 14 байт) --- */
+    uint16_t bfType;           // [0-1]   Сигнатура 'BM' (в Little-Endian это 0x4D42)
+    uint32_t bfSize;           // [2-5]   Полный размер всего BMP-файла в байтах
+    uint16_t bfReserved1;      // [6-7]   Зарезервировано (всегда 0)
+    uint16_t bfReserved2;      // [8-9]   Зарезервировано (всегда 0)
+    uint32_t bfOffBits;        // [10-13] Смещение в байтах от начала файла, где начинаются пиксели
+
+    /* --- Заголовок изображения (BITMAPINFOHEADER — 40 байт) --- */
+    uint32_t biSize;           // [14-17] Размер этого подзаголовка (всегда 40)
+    uint32_t biWidth;          // [18-21] ШИРИНА ИЗОБРАЖЕНИЯ в пикселях (Width)
+    uint32_t biHeight;         // [22-25] ВЫСОТА ИЗОБРАЖЕНИЯ в пикселях (Height)
+    uint16_t biPlanes;         // [26-27] Количество плоскостей (всегда 1)
+    uint16_t biBitCount;       // [28-29] ГЛУБИНА ЦВЕТА (у вашей картинки там будет 24 бита)
+    uint32_t biCompression;    // [30-33] Тип сжатия (0 — без сжатия, BI_RGB)
+    uint32_t biSizeImage;      // [34-37] Размер чистого массива пикселей в байтах
+    uint32_t biXPelsPerMeter;  // [38-41] Горизонтальное разрешение (пикс/метр)
+    uint32_t biYPelsPerMeter;  // [42-45] Вертикальное разрешение (пикс/метр)
+    uint32_t biClrUsed;        // [46-49] Количество используемых цветов из палитры
+    uint32_t biClrImportant;   // [50-53] Количество «важных» цветов (0 — все важные)
+} BMP_Header_t;
+
+uint8_t     FAT_Mount(FATmini_t* instance);
+uint8_t     FAT_OpenFile(FATmini_t* instance, const char* file_name);
+uint32_t    FAT_ReadFileData(FATmini_t* instance, uint8_t* out_buffer, uint32_t start_byte, uint32_t bytes_to_read);
+uint32_t    FAT_WriteFileData(FATmini_t* instance, const uint8_t* in_buffer, uint32_t start_byte, uint32_t bytes_to_write);
 
 #endif

@@ -413,7 +413,8 @@ uint8_t SDIO_SendCommand_Polling(uint8_t cmd_index, uint32_t argument, uint8_t r
     }
 
     // Очищаем финишные флаги команд
-    SDIO->ICR = SDIO_STA_CMDREND | SDIO_STA_CMDSENT | SDIO_STA_CTIMEOUT;
+    SDIO->ICR = SDIO_STA_CMDREND | SDIO_STA_CMDSENT | SDIO_STA_CTIMEOUT | SDIO_STA_CCRCFAIL;
+
 
     return SD_CMD_OK; 
 }
@@ -508,7 +509,7 @@ void SDIO_Switch_To_High_Speed(void) {
     SDIO->CLKCR |= SDIO_CLKCR_CLKEN;
 
     // Даем генератору окончательно стабилизироваться на новой частоте
-    for (volatile int i = 0; i < 10000; i++);
+    for (volatile int i = 0; i < 950000; i++);
 
     
 }

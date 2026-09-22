@@ -365,7 +365,7 @@ USB_OTG_FS->GCCFG |= USB_OTG_GCCFG_PWRDWN;
   USB_OTG_FS->GAHBCFG |= USB_OTG_GAHBCFG_GINT;
 
   /* Активируем вектор прерывания в контроллере NVIC */
-  NVIC_SetPriority(OTG_FS_IRQn, 5);
+  NVIC_SetPriority(OTG_FS_IRQn, 1);
   NVIC_EnableIRQ(OTG_FS_IRQn);
 }
 
@@ -697,7 +697,7 @@ void OTG_FS_IRQHandler(void) {
                                         
                                         if (page_code == 0x80) { // Unit Serial Number Page
                                             __ALIGN4 static const uint8_t serial_page_data[8] = {
-                                                0x00, 0x80, 0x00, 0x04, 'G', '3', '7', '0' // Просто заглушка
+                                                0x00, 0x80, 0x00, 0x04, 'G', '3', '9', '1' // Просто заглушка
                                             };
                                             uint32_t len = (msc_remaining_bytes < 8) ? msc_remaining_bytes : 8;
                                             msc_remaining_bytes -= len;

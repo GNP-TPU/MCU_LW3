@@ -2,160 +2,95 @@
 
 static const uint8_t lfn_offsets[13] = {1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30};
 
-uint8_t FAT_Mount(FAT_Instance_t* instance) {
-    if (instance == 0 || instance->disk_read == 0) {
+uint8_t FAT_Mount(FATmini_t* FAT_Struct) {
+    if (FAT_Struct == 0 || FAT_Struct->DiskRead == 0) {
         return 1; // Ошибка: диск не привязан к аппаратному чтению
     }
 
     static uint8_t __attribute__((aligned(4))) lba_buffer[512];
-    // 1. Читаем сектор 0 с W25Q в наш выровненный буфер
-    instance->disk_read(lba_buffer, 0, 512);
+    FAT_Struct->DiskRead(0, lba_buffer);
 
-    // 2. Проверяем сигнатуру 55 AA в конце сектoра
-    if (lba_buffer[510] != 0x55 || lba_buffer[511] != 0xAA) {
+
+    FAT_Struct->Sign    =   (uint16_t)lba_buffer[510] |
+                            (uint16_t)lba_buffer[511] << 8;
+
+    if (FAT_Struct->Sign != 0xAA55) {
         return 3; // Не валидная разметка диска
     }
 
-	// Заполняем базовую геометрию (ваша часть, расширенная дальше)
-	instance->bpb.bytes_per_sector    = (uint16_t)lba_buffer[11] | ((uint16_t)lba_buffer[12] << 8);
-	instance->bpb.sectors_per_cluster = lba_buffer[13];
-	instance->bpb.reserved_sectors    = (uint16_t)lba_buffer[14] | ((uint16_t)lba_buffer[15] << 8);
-	instance->bpb.num_fats            = lba_buffer[16];
-	instance->bpb.root_entry_count    = (uint16_t)lba_buffer[17] | ((uint16_t)lba_buffer[18] << 8);
-	instance->bpb.total_sectors_16    = (uint16_t)lba_buffer[19] | ((uint16_t)lba_buffer[20] << 8);
-	instance->bpb.media_descriptor    = lba_buffer[21];
-	instance->bpb.sectors_per_fat_16  = (uint16_t)lba_buffer[22] | ((uint16_t)lba_buffer[23] << 8);
-	instance->bpb.sectors_per_track   = (uint16_t)lba_buffer[24] | ((uint16_t)lba_buffer[25] << 8);
-	instance->bpb.num_heads           = (uint16_t)lba_buffer[26] | ((uint16_t)lba_buffer[27] << 8);
-
-	// 32-битные поля собираем из 4 байт подряд
-	instance->bpb.hidden_sectors      = (uint32_t)lba_buffer[28] | 
-							((uint32_t)lba_buffer[29] << 8) | 
-							((uint32_t)lba_buffer[30] << 16) | 
-							((uint32_t)lba_buffer[31] << 24);
-
-	instance->bpb.total_sectors_32    = (uint32_t)lba_buffer[32] | 
-							((uint32_t)lba_buffer[33] << 8) | 
-							((uint32_t)lba_buffer[34] << 16) | 
-							((uint32_t)lba_buffer[35] << 24);
-
-	// Переходим к заполнению расширения (union) для FAT12/16
-	instance->bpb.ext.fat12_16.drive_number   = lba_buffer[36];
-	instance->bpb.ext.fat12_16.reserved1      = lba_buffer[37];
-	instance->bpb.ext.fat12_16.boot_signature = lba_buffer[38];
-
-	instance->bpb.ext.fat12_16.volume_id      = (uint32_t)lba_buffer[39] | 
-							((uint32_t)lba_buffer[40] << 8) | 
-							((uint32_t)lba_buffer[41] << 16) | 
-							((uint32_t)lba_buffer[42] << 24);
-
-	// Побайтово копируем массивы строк (Volume Label и FS Type)
-	for (int i = 0; i < 11; i++) {
-		instance->bpb.ext.fat12_16.volume_label[i] = lba_buffer[43 + i]; // байты 43..53
-	}
-
-	for (int i = 0; i < 8; i++) {
-		instance->bpb.ext.fat12_16.fs_type[i] = lba_buffer[54 + i];     // байты 54..61
-	}
-
-	uint32_t fat1_sector = instance->bpb.reserved_sectors; 
-    uint32_t bytes_sec = instance->bpb.bytes_per_sector;
-    instance->flash_map.fat1_addr = fat1_sector * bytes_sec;
-
-	if (instance->bpb.sectors_per_fat_16 == 0) {
-        
-        // --- РАЗДЕЛ FAT32 ---
-        instance->type = FAT_TYPE_32;
-
-        // Побайтово заполняем union-расширение для FAT32 (начиная со смещения 36)
-        instance->bpb.ext.fat32.sectors_per_fat_32 = (uint32_t)lba_buffer[36] | ((uint32_t)lba_buffer[37] << 8) |
-                                                     ((uint32_t)lba_buffer[38] << 16) | ((uint32_t)lba_buffer[39] << 24);
-        
-        instance->bpb.ext.fat32.ext_flags          = (uint16_t)lba_buffer[40] | ((uint16_t)lba_buffer[41] << 8);
-        instance->bpb.ext.fat32.fs_version         = (uint16_t)lba_buffer[42] | ((uint16_t)lba_buffer[43] << 8);
-        
-        instance->bpb.ext.fat32.root_cluster       = (uint32_t)lba_buffer[44] | ((uint32_t)lba_buffer[45] << 8) |
-                                                     ((uint32_t)lba_buffer[46] << 16) | ((uint32_t)lba_buffer[47] << 24);
-        
-        instance->bpb.ext.fat32.fs_info_sector     = (uint16_t)lba_buffer[48] | ((uint16_t)lba_buffer[49] << 8);
-        instance->bpb.ext.fat32.backup_boot_sector = (uint16_t)lba_buffer[50] | ((uint16_t)lba_buffer[51] << 8);
-        
-        for (int i = 0; i < 12; i++) {
-            instance->bpb.ext.fat32.reserved2[i] = lba_buffer[52 + i];
-        }
-
-        // Расчёт карты адресов для FAT32
-        uint32_t fat2_sector = fat1_sector + instance->bpb.ext.fat32.sectors_per_fat_32;
-        instance->flash_map.fat2_addr = fat2_sector * bytes_sec;
-
-        uint32_t total_fat_sectors = instance->bpb.num_fats * instance->bpb.ext.fat32.sectors_per_fat_32;
-        uint32_t data_sector = instance->bpb.reserved_sectors + total_fat_sectors;
-        
-        instance->flash_map.data_addr = data_sector * bytes_sec;
-        
-        // В FAT32 корневой каталог лежит в области данных. Сохраняем физический адрес его стартового кластера
-        uint32_t root_clus = instance->bpb.ext.fat32.root_cluster;
-        instance->flash_map.root_dir_addr = instance->flash_map.data_addr + 
-                                            ((root_clus - 2) * instance->bpb.sectors_per_cluster * bytes_sec);
-        
-        instance->flash_map.root_dir_sectors = 0; // Для FAT32 это поле не используется фиксированно
-    } 
-    else {
-        
-        // --- РАЗДЕЛ FAT12 / FAT16 ---
-        // Побайтово заполняем union-расширение для FAT12/16 (начиная со смещения 36)
-        instance->bpb.ext.fat12_16.drive_number   = lba_buffer[36];
-        instance->bpb.ext.fat12_16.reserved1      = lba_buffer[37];
-        instance->bpb.ext.fat12_16.boot_signature = lba_buffer[38];
-        
-        instance->bpb.ext.fat12_16.volume_id      = (uint32_t)lba_buffer[39] | ((uint32_t)lba_buffer[40] << 8) |
-                                                    ((uint32_t)lba_buffer[41] << 16) | ((uint32_t)lba_buffer[42] << 24);
-        
-        for (int i = 0; i < 11; i++) {
-            instance->bpb.ext.fat12_16.volume_label[i] = lba_buffer[43 + i];
-        }
-        for (int i = 0; i < 8; i++) {
-            instance->bpb.ext.fat12_16.fs_type[i] = lba_buffer[54 + i];
-        }
-
-        // Расчёт карты адресов для FAT12/16
-        uint32_t fat2_sector = fat1_sector + instance->bpb.sectors_per_fat_16;
-        instance->flash_map.fat2_addr = fat2_sector * bytes_sec;
-
-        uint32_t root_sector = fat2_sector + instance->bpb.sectors_per_fat_16;
-        instance->flash_map.root_dir_addr = root_sector * bytes_sec;
-
-        instance->flash_map.root_dir_sectors = ((instance->bpb.root_entry_count * 32) + (bytes_sec - 1)) / bytes_sec;
-
-        uint32_t data_sector = root_sector + instance->flash_map.root_dir_sectors;
-        instance->flash_map.data_addr = data_sector * bytes_sec;
-
-        // Определяем точный тип (FAT12 или FAT16) по официальному стандарту Microsoft:
-        // Считаем общее количество секторов данных на диске
-        uint32_t total_sectors = (instance->bpb.total_sectors_16 != 0) ? 
-                                  instance->bpb.total_sectors_16 : instance->bpb.total_sectors_32;
-        
-        uint32_t total_root_and_fat_sectors = instance->bpb.reserved_sectors + 
-                                              (instance->bpb.num_fats * instance->bpb.sectors_per_fat_16) + 
-                                              instance->flash_map.root_dir_sectors;
-        
-        uint32_t data_sectors_count = total_sectors - total_root_and_fat_sectors;
-        uint32_t total_clusters_count = data_sectors_count / instance->bpb.sectors_per_cluster;
-
-        // Если кластеров меньше 4085 — это FAT12, если от 4085 до 65525 — это FAT16
-        if (total_clusters_count < 4085) {
-            instance->type = FAT_TYPE_12;
-        } else {
-            instance->type = FAT_TYPE_16;
-        }
+    for(uint8_t i = 0; i < 3; i++){
+        FAT_Struct->JumpBoot[i] =  (uint8_t)lba_buffer[0 + i]; 
     }
 
-    instance->current_dir_cluster = 0;
+    for(uint8_t i = 0; i < 8; i++){
+        FAT_Struct->OEMName[i] =  (uint8_t)lba_buffer[3 + i]; 
+    }
+    
+    FAT_Struct->BytesPerSector          =   (uint16_t)lba_buffer[11] |
+                                            (uint16_t)lba_buffer[12] << 8;
+
+    FAT_Struct->SectorsPerCluster       =   (uint8_t)lba_buffer[13];
+
+    FAT_Struct->ReservedSectorsCount    =   (uint16_t)lba_buffer[14] |
+                                            (uint16_t)lba_buffer[15] << 8;
+
+    FAT_Struct->NumFATs                 =   (uint8_t)lba_buffer[16];      
+    
+    FAT_Struct->RootEntriesCount        =   (uint16_t)lba_buffer[17] |
+                                            (uint16_t)lba_buffer[18] << 8;
+
+    FAT_Struct->MediaDescriptor         =   (uint8_t)lba_buffer[21];   
+
+    FAT_Struct->FAT.FAT12_16.TotalSectors16     =   (uint16_t)lba_buffer[19] |
+                                                    (uint16_t)lba_buffer[20] << 8; // 0 for FAT32
+
+    FAT_Struct->FAT_StartSector    = FAT_Struct->ReservedSectorsCount;
+    FAT_Struct->FAT_StartAddress   = FAT_Struct->FAT_StartSector * FAT_Struct->BytesPerSector;
+
+    if(FAT_Struct->FAT.FAT12_16.TotalSectors16 != 0){
+        FAT_Struct->FAT_Type = FAT_TYPE_12_16;
+
+        FAT_Struct->FAT.FAT12_16.TotalSectors16     =   (uint16_t)lba_buffer[19] |
+                                                        (uint16_t)lba_buffer[20] << 8; // 0 for FAT32
+        
+        FAT_Struct->FAT.FAT12_16.FAT_Size_16        =   (uint16_t)lba_buffer[22] |
+                                                        (uint16_t)lba_buffer[23] << 8; // 0 for FAT32
+        
+        FAT_Struct->FAT_TotalSectors = (uint32_t)FAT_Struct->FAT.FAT12_16.TotalSectors16;
+
+        FAT_Struct->RootDirectoryStartSector = FAT_Struct->FAT_NumSectors;
+
+
+    }
+    else{
+        FAT_Struct->FAT_Type = FAT_TYPE_32;
+
+        FAT_Struct->FAT.FAT32.TotalSectors32    =   (uint32_t)lba_buffer[32]        |
+                                                    (uint32_t)lba_buffer[33] << 8   |
+                                                    (uint32_t)lba_buffer[34] << 16  |
+                                                    (uint32_t)lba_buffer[35] << 24; 
+        
+        FAT_Struct->FAT.FAT32.FAT_Size_32       =   (uint32_t)lba_buffer[36]        |
+                                                    (uint32_t)lba_buffer[37] << 8   |
+                                                    (uint32_t)lba_buffer[38] << 16  |
+                                                    (uint32_t)lba_buffer[39] << 24;
+                                                
+        FAT_Struct->FAT.FAT32.RootCluster       =   (uint32_t)lba_buffer[44]        |
+                                                    (uint32_t)lba_buffer[45] << 8   |
+                                                    (uint32_t)lba_buffer[46] << 16  |
+                                                    (uint32_t)lba_buffer[47] << 24;
+
+        FAT_Struct->FAT_TotalSectors = (uint32_t)FAT_Struct->FAT.FAT32.TotalSectors32;
+        FAT_Struct->RootDirectoryStartSector = FAT_Struct->FAT.FAT32.RootCluster;
+
+    }
+
+    
 
     return 0; // Успешно скопировано в структуру!
 }
 
-
+/*
 uint32_t FAT_GetNextCluster(FAT_Instance_t* instance, uint32_t current_cluster) {
     uint32_t phys_addr = 0;
     
@@ -820,5 +755,5 @@ uint32_t FAT_WriteFileData(FAT_Instance_t* instance, const uint8_t* in_buffer, u
 
     return total_bytes_written;
 }
-
+*/
 

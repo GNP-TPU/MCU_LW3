@@ -125,55 +125,16 @@ ST77xx_t MyDisplay = {
 };
 //====================================================================================================
 
-FAT_Instance_t SD_FAT;
+FATmini_t SD_FAT;
 
-void SD_Read_For_FAT(uint8_t* buffer, uint32_t phys_address, uint32_t length) {
+void SD_Read_For_FAT(uint32_t sector_address, uint8_t* buffer) {
     // Вызываем вашу реальную функцию чтения низкого уровня
-    SDIO_ReadBlock_DMA(phys_address, (uint32_t*)buffer);
+    SDIO_ReadBlock_DMA(sector_address, (uint32_t*)buffer);
 }
 
-void SD_Write_For_FAT(uint8_t* buffer, uint32_t phys_address, uint32_t length) {
-	// Находим физический адрес начала 4 КБ сектора флешки (округляем вниз до 4096)
-	uint32_t flash_sector_address = phys_address & 0xFFFFF000;
-		
-	// Вычисляем смещение (индекс) внутри 4 КБ кэша, куда запишутся новые 512 байт
-	uint32_t cache_offset = phys_address % 4096;
-
-	if (current_cached_sector_addr != -1 && current_cached_sector_addr != flash_sector_address) {
-        //Flush_Flash_Cache(); 
-    }
-
-    // 4. Подгрузка кэша: если кэш пустой, считываем весь 4 КБ сектор с W25Q в ОЗУ
-    if (current_cached_sector_addr == -1) {
-        W25Q_FastRead(&MyFlash, flash_cache_buffer, flash_sector_address, 4096);
-        current_cached_sector_addr = flash_sector_address;
-    }
-
-    // 5. Модификация данных в ОЗУ: копируем новые байты файловой системы поверх старых
-    memcpy(&flash_cache_buffer[cache_offset], buffer, length);
+void SD_Write_For_FAT(uint32_t sector_address, uint8_t* buffer) {
+	SDIO_WriteBlock_DMA(sector_address, (uint32_t*)buffer);
 }
-
-typedef struct __attribute__((packed)) {
-    /* --- Заголовок файла (BITMAPFILEHEADER — 14 байт) --- */
-    uint16_t bfType;           // [0-1]   Сигнатура 'BM' (в Little-Endian это 0x4D42)
-    uint32_t bfSize;           // [2-5]   Полный размер всего BMP-файла в байтах
-    uint16_t bfReserved1;      // [6-7]   Зарезервировано (всегда 0)
-    uint16_t bfReserved2;      // [8-9]   Зарезервировано (всегда 0)
-    uint32_t bfOffBits;        // [10-13] Смещение в байтах от начала файла, где начинаются пиксели
-
-    /* --- Заголовок изображения (BITMAPINFOHEADER — 40 байт) --- */
-    uint32_t biSize;           // [14-17] Размер этого подзаголовка (всегда 40)
-    uint32_t biWidth;          // [18-21] ШИРИНА ИЗОБРАЖЕНИЯ в пикселях (Width)
-    uint32_t biHeight;         // [22-25] ВЫСОТА ИЗОБРАЖЕНИЯ в пикселях (Height)
-    uint16_t biPlanes;         // [26-27] Количество плоскостей (всегда 1)
-    uint16_t biBitCount;       // [28-29] ГЛУБИНА ЦВЕТА (у вашей картинки там будет 24 бита)
-    uint32_t biCompression;    // [30-33] Тип сжатия (0 — без сжатия, BI_RGB)
-    uint32_t biSizeImage;      // [34-37] Размер чистого массива пикселей в байтах
-    uint32_t biXPelsPerMeter;  // [38-41] Горизонтальное разрешение (пикс/метр)
-    uint32_t biYPelsPerMeter;  // [42-45] Вертикальное разрешение (пикс/метр)
-    uint32_t biClrUsed;        // [46-49] Количество используемых цветов из палитры
-    uint32_t biClrImportant;   // [50-53] Количество «важных» цветов (0 — все важные)
-} BMP_Header_t;
 
 BMP_Header_t bmp_info;
 uint8_t row_buffer[300];
@@ -195,11 +156,9 @@ int main(void){
 	GPIO_Configure();
 	SPI_Configure();
 	USART_Configure();
-	
+
 	SDIO_Init();
 
-	
-	
 	char test_msg[128];
 
 	USART_SendString(USART1, "\r\n");
@@ -235,11 +194,16 @@ int main(void){
 				if(sd_status == 0){
 					SDIO_Switch_To_High_Speed();
 
-					SD_FAT.disk_read = SD_Read_For_FAT;
-					SD_FAT.disk_write = SD_Write_For_FAT;
-						
-					FAT_Mount(&SD_FAT);
-					
+					SD_FAT.DiskRead = SD_Read_For_FAT;
+					SD_FAT.DiskWrite = SD_Write_For_FAT;
+
+					sd_status = FAT_Mount(&SD_FAT);
+
+					sprintf(test_msg, "[FAT] FAT Mount status: 0x%02X\r\n", sd_status);
+					USART_SendString(USART1, test_msg);
+
+					sprintf(test_msg, "[FAT] FAT Sign: 0x%04X\r\n", SD_FAT.Sign);
+					USART_SendString(USART1, test_msg);
 				}
 				else{
 					sprintf(test_msg, "[SD Init] 4 bit bus disabled");
@@ -261,10 +225,10 @@ int main(void){
 		USART_SendString(USART1, test_msg);
 	}
 
-	USB_Core_Init();
+	// USB_Core_Init();
 	
 	while(1){
-		USB_MSC_Background_Process();
+		// USB_MSC_Background_Process();
 		
 		if(data_available){
 			if(uart_cmd[0] == 0){
