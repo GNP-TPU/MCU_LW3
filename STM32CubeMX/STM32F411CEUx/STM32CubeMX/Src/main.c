@@ -205,13 +205,16 @@ int main(void){
 					sprintf(test_msg, "[FAT] Sign: 0x%04X\r\n", SD_FAT.Sign);
 					USART_SendString(USART1, test_msg);
 
-					sprintf(test_msg, "[FAT] Bytes per Sector: 0x%04X\r\n", SD_FAT.BytesPerSector);
+					sprintf(test_msg, "[FAT] Bytes per Sector: %u\r\n", SD_FAT.BytesPerSector);
 					USART_SendString(USART1, test_msg);
 
-					sprintf(test_msg, "[FAT] Sectors per Cluster: 0x%04X\r\n", SD_FAT.SectorsPerCluster);
+					sprintf(test_msg, "[FAT] Sectors per Cluster: %u\r\n", SD_FAT.SectorsPerCluster);
 					USART_SendString(USART1, test_msg);
 
-					sprintf(test_msg, "[FAT] Sectors per Cluster: 0x%04X\r\n", SD_FAT.SectorsPerCluster);
+					sprintf(test_msg, "[FAT] Count Of Clusters: %u\r\n", SD_FAT.CountOfClusters);
+					USART_SendString(USART1, test_msg);
+
+					sprintf(test_msg, "[FAT] FAT Type: %s\r\n", SD_FAT.FAT_Type_String);
 					USART_SendString(USART1, test_msg);
 				}
 				else{

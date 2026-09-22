@@ -44,8 +44,10 @@ uint8_t FAT_Mount(FATmini_t* FAT_Struct) {
     FAT_Struct->FAT.FAT12_16.TotalSectors16     =   (uint16_t)lba_buffer[19] |
                                                     (uint16_t)lba_buffer[20] << 8; // 0 for FAT32
 
-    FAT_Struct->FAT_StartSector    = FAT_Struct->ReservedSectorsCount;
-    FAT_Struct->FAT_StartAddress   = FAT_Struct->FAT_StartSector * FAT_Struct->BytesPerSector;
+    FAT_Struct->FAT_StartSector     = FAT_Struct->ReservedSectorsCount;
+    FAT_Struct->FAT_StartAddress    = FAT_Struct->FAT_StartSector * FAT_Struct->BytesPerSector;
+
+    
 
     if(FAT_Struct->FAT.FAT12_16.TotalSectors16 != 0){
         FAT_Struct->FAT_Type = FAT_TYPE_12_16;
@@ -56,9 +58,21 @@ uint8_t FAT_Mount(FATmini_t* FAT_Struct) {
         FAT_Struct->FAT.FAT12_16.FAT_Size_16        =   (uint16_t)lba_buffer[22] |
                                                         (uint16_t)lba_buffer[23] << 8; // 0 for FAT32
         
-        FAT_Struct->FAT_TotalSectors = (uint32_t)FAT_Struct->FAT.FAT12_16.TotalSectors16;
+        FAT_Struct->TotalSectors                = (uint32_t)FAT_Struct->FAT.FAT12_16.TotalSectors16;
 
-        FAT_Struct->RootDirectoryStartSector = FAT_Struct->FAT_NumSectors;
+        FAT_Struct->FAT_NumSectors              = FAT_Struct->FAT.FAT12_16.FAT_Size_16 * FAT_Struct->NumFATs;
+
+
+        FAT_Struct->RootDirectoryStartSector    = FAT_Struct->FAT_StartSector + FAT_Struct->FAT_NumSectors;
+
+        FAT_Struct->Cluster2_StartSector =  FAT_Struct->RootDirectoryStartSector + 
+                                            (FAT_Struct->RootEntriesCount * 32 + FAT_Struct->BytesPerSector - 1) /
+                                            FAT_Struct->BytesPerSector;
+
+        FAT_Struct->CountOfClusters =   (FAT_Struct->TotalSectors - FAT_Struct->ReservedSectorsCount - 
+                                        FAT_Struct->FAT.FAT12_16.FAT_Size_16 * FAT_Struct->NumFATs -
+                                        (FAT_Struct->RootEntriesCount * 32 + FAT_Struct->BytesPerSector - 1) /
+                                        FAT_Struct->BytesPerSector) / FAT_Struct->SectorsPerCluster;
 
 
     }
@@ -80,12 +94,42 @@ uint8_t FAT_Mount(FATmini_t* FAT_Struct) {
                                                     (uint32_t)lba_buffer[46] << 16  |
                                                     (uint32_t)lba_buffer[47] << 24;
 
-        FAT_Struct->FAT_TotalSectors = (uint32_t)FAT_Struct->FAT.FAT32.TotalSectors32;
-        FAT_Struct->RootDirectoryStartSector = FAT_Struct->FAT.FAT32.RootCluster;
+        FAT_Struct->TotalSectors            = (uint32_t)FAT_Struct->FAT.FAT32.TotalSectors32;
+
+        FAT_Struct->FAT_NumSectors          = FAT_Struct->FAT.FAT32.FAT_Size_32 * FAT_Struct->NumFATs;
+
+        
+
+        FAT_Struct->Cluster2_StartSector    = FAT_Struct->FAT_StartSector + FAT_Struct->FAT_NumSectors;
+
+        FAT_Struct->RootDirectoryStartSector    =   FAT_Struct->Cluster2_StartSector +
+                                                    ((FAT_Struct->FAT.FAT32.RootCluster - 2) *
+                                                    FAT_Struct->SectorsPerCluster);
+
+        FAT_Struct->CountOfClusters =   (FAT_Struct->TotalSectors - FAT_Struct->ReservedSectorsCount - 
+                                        FAT_Struct->FAT.FAT32.FAT_Size_32 * FAT_Struct->NumFATs) / 
+                                        FAT_Struct->SectorsPerCluster;
 
     }
 
-    
+    if(FAT_Struct->CountOfClusters <= 4085){
+        FAT_Struct->FAT_Type = FAT_TYPE_12;
+        FAT_Struct->FAT_Type_String = "FAT12\0";
+    }
+    else if(FAT_Struct->CountOfClusters >= 4086 && FAT_Struct->CountOfClusters <= 65525){
+        FAT_Struct->FAT_Type = FAT_TYPE_16;
+        FAT_Struct->FAT_Type_String = "FAT16\0";
+    }
+    else if(FAT_Struct->CountOfClusters >= 65526){
+        FAT_Struct->FAT_Type = FAT_TYPE_32;
+        FAT_Struct->FAT_Type_String = "FAT32\0";
+    }
+    else{
+        FAT_Struct->FAT_Type = FAT_TYPE_UNKNOWN;
+        FAT_Struct->FAT_Type_String = "FAT UNKNOWN";
+    }
+
+
 
     return 0; // Успешно скопировано в структуру!
 }

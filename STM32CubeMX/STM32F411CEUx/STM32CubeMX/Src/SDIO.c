@@ -221,7 +221,7 @@ void SDIO_PowerOn_Cycles(void) {
     // тактовый сигнал СРАЗУ ЖЕ идет на ножку CLK в чистом виде (без бита CPSMEN).
     // Просто крутим пустой цикл, давая карте получить её обязательные 74+ такта
     // для принудительного сброса High-Speed режима.
-    for (volatile int i = 0; i < 250000; i++) {
+    for (volatile int i = 0; i < 25000; i++) {
         __NOP(); 
     }
     
@@ -499,7 +499,7 @@ void SDIO_Switch_To_High_Speed(void) {
     // 3. Выставляем новый делитель. 
     // Для 16 МГц: прописываем 1 (0x01)
     // Для максимальных 24 МГц: прописываем 0 (0x00)
-    SDIO->CLKCR |= (10 << SDIO_CLKCR_CLKDIV_Pos); 
+    SDIO->CLKCR |= (22 << SDIO_CLKCR_CLKDIV_Pos); 
 
     // SDIO->CLKCR |= SDIO_CLKCR_NEGEDGE;
 

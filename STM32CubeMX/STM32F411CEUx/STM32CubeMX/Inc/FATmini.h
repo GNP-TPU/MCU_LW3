@@ -84,18 +84,22 @@ typedef struct {
 
     } __attribute__((packed)) FAT;
 
-    uint32_t FAT_TotalSectors;
+    uint32_t TotalSectors;
 
     uint32_t FAT_StartSector;
     uint32_t FAT_StartAddress;
     uint32_t FAT_NumSectors;
 
     uint32_t RootDirectoryStartSector;
+    uint32_t Cluster2_StartSector;
 
-    uint32_t DataSectors;
     uint32_t CountOfClusters;
 
+    union{
 
+    } __attribute__((packed)) File;
+
+    char* FAT_Type_String;
 
 } __attribute__((packed, aligned(4))) FATmini_t;
 
