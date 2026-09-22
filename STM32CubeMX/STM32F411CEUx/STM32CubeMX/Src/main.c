@@ -199,10 +199,19 @@ int main(void){
 
 					sd_status = FAT_Mount(&SD_FAT);
 
-					sprintf(test_msg, "[FAT] FAT Mount status: 0x%02X\r\n", sd_status);
+					sprintf(test_msg, "[FAT] Mount status: 0x%02X\r\n", sd_status);
 					USART_SendString(USART1, test_msg);
 
-					sprintf(test_msg, "[FAT] FAT Sign: 0x%04X\r\n", SD_FAT.Sign);
+					sprintf(test_msg, "[FAT] Sign: 0x%04X\r\n", SD_FAT.Sign);
+					USART_SendString(USART1, test_msg);
+
+					sprintf(test_msg, "[FAT] Bytes per Sector: 0x%04X\r\n", SD_FAT.BytesPerSector);
+					USART_SendString(USART1, test_msg);
+
+					sprintf(test_msg, "[FAT] Sectors per Cluster: 0x%04X\r\n", SD_FAT.SectorsPerCluster);
+					USART_SendString(USART1, test_msg);
+
+					sprintf(test_msg, "[FAT] Sectors per Cluster: 0x%04X\r\n", SD_FAT.SectorsPerCluster);
 					USART_SendString(USART1, test_msg);
 				}
 				else{
