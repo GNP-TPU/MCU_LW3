@@ -23,6 +23,7 @@ typedef struct {
     FAT_WriteFunc_t     DiskWrite;
 
     FAT_Type_t          FAT_Type;
+    char*               FAT_Type_String;
     /*
     |Type|      |Field name|            | Offset    | Size (bytes) |
     */
@@ -39,10 +40,9 @@ typedef struct {
     uint16_t    SectorsPerTrack;        // [24]     | 2
     uint16_t    NumHeads;               // [26]     | 2
     uint32_t    HiddenSectors;          // [28]     | 4
-    
 
     uint16_t    Sign;                   // [510]    | 2     // Always 0xAA55
-
+    
     union{
         struct __attribute__((packed)){
             uint16_t    TotalSectors16;         // [19]     | 2     // FAT32 value 0, > 0xFFFF used TotalSectors32
@@ -90,16 +90,22 @@ typedef struct {
     uint32_t FAT_StartAddress;
     uint32_t FAT_NumSectors;
 
-    uint32_t RootDirectoryStartSector;
+    uint32_t RootDirectory_StartSector;
+    uint32_t RootDirectory_StartAddress;
+    uint32_t RootDirectory_NumSectors;
+
     uint32_t Cluster2_StartSector;
+    uint32_t Cluster2_StartAddress;
 
     uint32_t CountOfClusters;
 
-    union{
-
-    } __attribute__((packed)) File;
-
-    char* FAT_Type_String;
+    struct {
+        uint8_t     Attr;               // Аттрибут директории
+        uint32_t    FirstCluster;       // Первый кластер найденного файла
+        uint32_t    CurrentCluster;     // Кластер, на котором сейчас находится указатель чтения
+        uint32_t    FileSize;           // Размер файла в байтах
+        uint32_t    CurrentPosition;    // Текущая позиция чтения (в байтах от начала файла)
+    } __attribute__((packed, aligned(4))) Directory;
 
 } __attribute__((packed, aligned(4))) FATmini_t;
 
@@ -128,8 +134,10 @@ typedef struct __attribute__((packed)) {
 } BMP_Header_t;
 
 uint8_t     FAT_Mount(FATmini_t* instance);
-uint8_t     FAT_OpenFile(FATmini_t* instance, const char* file_name);
-uint32_t    FAT_ReadFileData(FATmini_t* instance, uint8_t* out_buffer, uint32_t start_byte, uint32_t bytes_to_read);
-uint32_t    FAT_WriteFileData(FATmini_t* instance, const uint8_t* in_buffer, uint32_t start_byte, uint32_t bytes_to_write);
+bool        FAT_OpenFile(FATmini_t* FAT_Struct, char* FileName);
+bool        FAT_OpenDirectory(FATmini_t* FAT_Struct, char* DirName);
+void        FAT_ReturnRootDirectory(FATmini_t* FAT_Struct);
+
+bool        FAT_ReadFile(FATmini_t* FAT_Struct, uint8_t* OutBuffer, uint32_t StartByte, uint32_t Length);
 
 #endif

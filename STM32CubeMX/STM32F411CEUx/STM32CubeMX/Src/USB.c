@@ -332,41 +332,41 @@ __ALIGN4 const uint8_t USB_ConfigDescriptor[] = {
 
 
 void USB_Core_Init(void) {
-  /* Включаем тактирование USB OTG FS */
-  RCC->AHB2ENR |= RCC_AHB2ENR_OTGFSEN;
+    /* Включаем тактирование USB OTG FS */
+    RCC->AHB2ENR |= RCC_AHB2ENR_OTGFSEN;
 
-  /* Отключаем аппаратный контроль линии VBUS */
-  USB_OTG_FS->GCCFG |= USB_OTG_GCCFG_NOVBUSSENS;
-  USB_OTG_FS->GCCFG &= ~(USB_OTG_GCCFG_VBUSBSEN | USB_OTG_GCCFG_VBUSASEN);
+    /* Отключаем аппаратный контроль линии VBUS */
+    USB_OTG_FS->GCCFG |= USB_OTG_GCCFG_NOVBUSSENS;
+    USB_OTG_FS->GCCFG &= ~(USB_OTG_GCCFG_VBUSBSEN | USB_OTG_GCCFG_VBUSASEN);
 
-  /* Активируем встроенный FS PHY трансивер */
-USB_OTG_FS->GCCFG |= USB_OTG_GCCFG_PWRDWN;
+    /* Активируем встроенный FS PHY трансивер */
+    USB_OTG_FS->GCCFG |= USB_OTG_GCCFG_PWRDWN;
 
 
-  /* Перезапускаем аппаратное ядро */
-  USB_OTG_FS->GRSTCTL |= USB_OTG_GRSTCTL_CSRST;
-  while (USB_OTG_FS->GRSTCTL & USB_OTG_GRSTCTL_CSRST);
+    /* Перезапускаем аппаратное ядро */
+    USB_OTG_FS->GRSTCTL |= USB_OTG_GRSTCTL_CSRST;
+    while (USB_OTG_FS->GRSTCTL & USB_OTG_GRSTCTL_CSRST);
 
-  /* Конфигурируем режим устройства (Device Mode) */
-  USB_OTG_FS->GUSBCFG |= USB_OTG_GUSBCFG_FDMOD; 
-    
-  /* Настраиваем задержки шины (Turnaround time) под частоту 96 МГц */
-  USB_OTG_FS->GUSBCFG &= ~(USB_OTG_GUSBCFG_TRDT);
-  USB_OTG_FS->GUSBCFG |= (9 << USB_OTG_GUSBCFG_TRDT_Pos);
-	
-  /* Выводим устройство из режима программного отключения (Soft Disconnect) */
-  USB_DEVICE->DCTL &= ~USB_OTG_DCTL_SDIS;
+    /* Конфигурируем режим устройства (Device Mode) */
+    USB_OTG_FS->GUSBCFG |= USB_OTG_GUSBCFG_FDMOD; 
+        
+    /* Настраиваем задержки шины (Turnaround time) под частоту 96 МГц */
+    USB_OTG_FS->GUSBCFG &= ~(USB_OTG_GUSBCFG_TRDT);
+    USB_OTG_FS->GUSBCFG |= (9 << USB_OTG_GUSBCFG_TRDT_Pos);
+        
+    /* Выводим устройство из режима программного отключения (Soft Disconnect) */
+    USB_DEVICE->DCTL &= ~USB_OTG_DCTL_SDIS;
 
-  /* Включаем маску прерываний контроллера USB */
-  USB_OTG_FS->GINTMSK |= USB_OTG_GINTMSK_USBRST | USB_OTG_GINTMSK_ENUMDNEM |
-                           USB_OTG_GINTMSK_RXFLVLM | USB_OTG_GINTMSK_IEPINT;
-    
-  /* Разрешаем глобальные прерывания модуля */
-  USB_OTG_FS->GAHBCFG |= USB_OTG_GAHBCFG_GINT;
+    /* Включаем маску прерываний контроллера USB */
+    USB_OTG_FS->GINTMSK |= USB_OTG_GINTMSK_USBRST | USB_OTG_GINTMSK_ENUMDNEM |
+                            USB_OTG_GINTMSK_RXFLVLM | USB_OTG_GINTMSK_IEPINT;
+        
+    /* Разрешаем глобальные прерывания модуля */
+    USB_OTG_FS->GAHBCFG |= USB_OTG_GAHBCFG_GINT;
 
-  /* Активируем вектор прерывания в контроллере NVIC */
-  NVIC_SetPriority(OTG_FS_IRQn, 1);
-  NVIC_EnableIRQ(OTG_FS_IRQn);
+    /* Активируем вектор прерывания в контроллере NVIC */
+    NVIC_SetPriority(OTG_FS_IRQn, 1);
+    NVIC_EnableIRQ(OTG_FS_IRQn);
 }
 
 void USB_EP_Tx(uint8_t epnum, const uint8_t *pdata, uint32_t len) {
@@ -669,7 +669,7 @@ void OTG_FS_IRQHandler(void) {
                     // ============================================================
                     // ЭТАП 1: CBW пакеты
                     // ============================================================
-                    if (msc_scsi_cmd != 0x2A) { 
+                    if (msc_scsi_cmd != 0x2A && msc_scsi_cmd != 0x15) { 
                         if (bcnt == 31) { 
                             uint32_t *pdest = (uint32_t*)&cbw;
                             for (uint32_t i = 0; i < words_to_read; i++) {
@@ -728,6 +728,24 @@ void OTG_FS_IRQHandler(void) {
                                         msc_remaining_bytes -= len;
                                         USB_EP_Tx(1, inquiry_data, len); 
                                         msc_remaining_bytes = 0;
+                                    }
+                                }
+                                else if(msc_scsi_cmd == 0x15){ // MODE_SELECT (6)
+                                    msc_remaining_bytes = cbw.dCBWDataTransferLength;
+    
+                                    if (msc_remaining_bytes > 0) {
+                                        // Меняем msc_scsi_cmd на специальное значение (например, 0x15), 
+                                        // чтобы на следующем шаге прерывание знало, что мы ждем OUT-данные параметров
+                                        msc_scsi_cmd = 0x15; 
+                                        
+                                        // Включаем аппаратную точку OUT на прием этих параметров от хоста
+                                        EP1_OUT->DOEPTSIZ = (1U << USB_OTG_DOEPTSIZ_PKTCNT_Pos) | (64 << USB_OTG_DOEPTSIZ_XFRSIZ_Pos);
+                                        EP1_OUT->DOEPCTL |= USB_OTG_DOEPCTL_EPENA | USB_OTG_DOEPCTL_CNAK;
+                                    } 
+                                    else {
+                                        // Если данных почему-то нет, сразу завершаем команду успешно
+                                        msc_remaining_bytes = 0;
+                                        MSC_Send_CSW(0);
                                     }
                                 }
                                 else if (msc_scsi_cmd == 0x23) { // READ_FORMAT_CAPACITIES
@@ -823,7 +841,7 @@ void OTG_FS_IRQHandler(void) {
                             }
                             
                             // Перевзвод точки OUT на новый CBW (выполняется только если это не запуск WRITE_10)
-                            if (msc_scsi_cmd != 0x2A) {
+                            if (msc_scsi_cmd != 0x2A && msc_scsi_cmd != 0x15) {
                                 EP1_OUT->DOEPTSIZ = (1U << USB_OTG_DOEPTSIZ_PKTCNT_Pos) | (64 << USB_OTG_DOEPTSIZ_XFRSIZ_Pos);
                                 EP1_OUT->DOEPCTL |= USB_OTG_DOEPCTL_EPENA | USB_OTG_DOEPCTL_CNAK;
                             }
@@ -839,44 +857,80 @@ void OTG_FS_IRQHandler(void) {
                     // ЭТАП 2: WRITE_10. Прилетели сырые Bulk-данные секторов
                     // ============================================================
                     else { 
-                        // 1. Вычисляем смещение внутри текущего 512-байтного буфера сектора
-                        uint32_t total_received_bytes = cbw.dCBWDataTransferLength - msc_remaining_bytes;
-                        uint32_t sector_offset = total_received_bytes % STORAGE_SECTOR_SIZE;
+                        if(msc_scsi_cmd == 0x2A){
+                            // 1. Вычисляем смещение внутри текущего 512-байтного буфера сектора
+                            uint32_t total_received_bytes = cbw.dCBWDataTransferLength - msc_remaining_bytes;
+                            uint32_t sector_offset = total_received_bytes % STORAGE_SECTOR_SIZE;
 
-                        // 2. Выгребаем слова из FIFO и пишем во временный буфер сектора
-                        uint32_t *buf_ptr = (uint32_t*)&msc_sector_buffer[sector_offset];
-                        for (uint32_t i = 0; i < words_to_read; i++) {
-                            buf_ptr[i] = *USB_GET_FIFO(1);
-                        }
+                            // 2. Выгребаем слова из FIFO и пишем во временный буфер сектора
+                            uint32_t *buf_ptr = (uint32_t*)&msc_sector_buffer[sector_offset];
+                            for (uint32_t i = 0; i < words_to_read; i++) {
+                                buf_ptr[i] = *USB_GET_FIFO(1);
+                            }
 
-                        // 3. Уменьшаем глобальный счетчик оставшихся байт всей команды WRITE_10
-                        msc_remaining_bytes = (msc_remaining_bytes >= bcnt) ? (msc_remaining_bytes - bcnt) : 0;
-                        
-                        // 4. Считаем, сколько байт набралось в текущем секторе после этой пачки
-                        uint32_t current_sector_filled = sector_offset + bcnt;
-
-                        // 5. Проверяем: набрался ли ПОЛНЫЙ сектор (512 байт) или это самый конец передачи?
-                        if (current_sector_filled >= STORAGE_SECTOR_SIZE || msc_remaining_bytes == 0) {
+                            // 3. Уменьшаем глобальный счетчик оставшихся байт всей команды WRITE_10
+                            msc_remaining_bytes = (msc_remaining_bytes >= bcnt) ? (msc_remaining_bytes - bcnt) : 0;
                             
-                            // Передаем задачу на физическую запись во флеш в main()
-                            msc_write_lba = msc_lba; 
-                            msc_write_request = 1; 
-                            
-                            // Увеличиваем LBA для следующего сектора
-                            msc_lba++;
+                            // 4. Считаем, сколько байт набралось в текущем секторе после этой пачки
+                            uint32_t current_sector_filled = sector_offset + bcnt;
 
-                            // !!! ВАЖНО !!!
-                            // Мы НЕ перевзводим здесь точку OUT и НЕ отправляем CSW.
-                            // Так как данные физически еще не записаны на флешку, мы просто выходим из прерывания.
-                            // Проверку (msc_remaining_bytes == 0) и отправку CSW сделает main() после того, 
-                            // как функции PageProgram успешно завершат работу.
+                            // 5. Проверяем: набрался ли ПОЛНЫЙ сектор (512 байт) или это самый конец передачи?
+                            if (current_sector_filled >= STORAGE_SECTOR_SIZE || msc_remaining_bytes == 0) {
+                                
+                                // Передаем задачу на физическую запись во флеш в main()
+                                msc_write_lba = msc_lba; 
+                                msc_write_request = 1; 
+                                
+                                // Увеличиваем LBA для следующего сектора
+                                msc_lba++;
+
+                                // !!! ВАЖНО !!!
+                                // Мы НЕ перевзводим здесь точку OUT и НЕ отправляем CSW.
+                                // Так как данные физически еще не записаны на флешку, мы просто выходим из прерывания.
+                                // Проверку (msc_remaining_bytes == 0) и отправку CSW сделает main() после того, 
+                                // как функции PageProgram успешно завершат работу.
+                            }
+                            else {
+                                // Сектор еще не заполнился
+                                // Перевзводим точку OUT на прием следующего 64-байтного пакета сырых данных
+                                EP1_OUT->DOEPTSIZ = (1U << USB_OTG_DOEPTSIZ_PKTCNT_Pos) | (64 << USB_OTG_DOEPTSIZ_XFRSIZ_Pos);
+                                EP1_OUT->DOEPCTL |= USB_OTG_DOEPCTL_EPENA | USB_OTG_DOEPCTL_CNAK;
+                            }
                         }
+                        // --- ВЕТКА 2: ОБРАБОТКА КОМАНДЫ MODE_SELECT_6 ---
+                        else if (msc_scsi_cmd == 0x15) {
+                            // Выгребаем слова из FIFO «в корзину» (просто освобождаем буфер USB)
+                            for (uint32_t i = 0; i < words_to_read; i++) {
+                                (void)*USB_GET_FIFO(1);
+                            }
+
+                            // Уменьшаем счетчик оставшихся байт параметров
+                            msc_remaining_bytes = (msc_remaining_bytes >= bcnt) ? (msc_remaining_bytes - bcnt) : 0;
+
+                            // Если хост передал абсолютно все байты параметров
+                            if (msc_remaining_bytes == 0) {
+                                msc_scsi_cmd = 0; // Сбрасываем команду, фаза данных окончена
+                                
+                                // ВАЖНО: Сами отвечаем хосту успешным статусом (main для этого дергать не нужно)
+                                MSC_Send_CSW(0); 
+
+                                // Перевзводим точку OUT на прием СЛЕДУЮЩЕГО НОВОГО CBW пакета от ПК
+                                EP1_OUT->DOEPTSIZ = (1U << USB_OTG_DOEPTSIZ_PKTCNT_Pos) | (64 << USB_OTG_DOEPTSIZ_XFRSIZ_Pos);
+                                EP1_OUT->DOEPCTL |= USB_OTG_DOEPCTL_EPENA | USB_OTG_DOEPCTL_CNAK;
+                            }
+                            else {
+                                // Если хост прислал много байт параметров и это еще не конец — продолжаем слушать OUT
+                                EP1_OUT->DOEPTSIZ = (1U << USB_OTG_DOEPTSIZ_PKTCNT_Pos) | (64 << USB_OTG_DOEPTSIZ_XFRSIZ_Pos);
+                                EP1_OUT->DOEPCTL |= USB_OTG_DOEPCTL_EPENA | USB_OTG_DOEPCTL_CNAK;
+                            }
+                        }
+                        // --- НА ВСЯКИЙ СЛУЧАЙ: Защита от непредвиденных команд ---
                         else {
-                            // Сектор еще не заполнился
-                            // Перевзводим точку OUT на прием следующего 64-байтного пакета сырых данных
+                            for (uint32_t i = 0; i < words_to_read; i++) { (void)*USB_GET_FIFO(1); }
                             EP1_OUT->DOEPTSIZ = (1U << USB_OTG_DOEPTSIZ_PKTCNT_Pos) | (64 << USB_OTG_DOEPTSIZ_XFRSIZ_Pos);
                             EP1_OUT->DOEPCTL |= USB_OTG_DOEPCTL_EPENA | USB_OTG_DOEPCTL_CNAK;
                         }
+                        
                     }
                 }
                 else {

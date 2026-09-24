@@ -1,5 +1,9 @@
 #include "FATmini.h"
 
+#define tolower(c)  (((c) >= 'A' && (c) <= 'Z') ? ((c) + 32) : (c))
+
+static uint8_t __attribute__((aligned(4))) lba_buffer[512];
+
 static const uint8_t lfn_offsets[13] = {1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30};
 
 uint8_t FAT_Mount(FATmini_t* FAT_Struct) {
@@ -7,7 +11,6 @@ uint8_t FAT_Mount(FATmini_t* FAT_Struct) {
         return 1; // Ошибка: диск не привязан к аппаратному чтению
     }
 
-    static uint8_t __attribute__((aligned(4))) lba_buffer[512];
     FAT_Struct->DiskRead(0, lba_buffer);
 
 
@@ -63,9 +66,11 @@ uint8_t FAT_Mount(FATmini_t* FAT_Struct) {
         FAT_Struct->FAT_NumSectors              = FAT_Struct->FAT.FAT12_16.FAT_Size_16 * FAT_Struct->NumFATs;
 
 
-        FAT_Struct->RootDirectoryStartSector    = FAT_Struct->FAT_StartSector + FAT_Struct->FAT_NumSectors;
+        FAT_Struct->RootDirectory_StartSector   = FAT_Struct->FAT_StartSector + FAT_Struct->FAT_NumSectors;
+        
+        
 
-        FAT_Struct->Cluster2_StartSector =  FAT_Struct->RootDirectoryStartSector + 
+        FAT_Struct->Cluster2_StartSector =  FAT_Struct->RootDirectory_StartSector + 
                                             (FAT_Struct->RootEntriesCount * 32 + FAT_Struct->BytesPerSector - 1) /
                                             FAT_Struct->BytesPerSector;
 
@@ -73,6 +78,8 @@ uint8_t FAT_Mount(FATmini_t* FAT_Struct) {
                                         FAT_Struct->FAT.FAT12_16.FAT_Size_16 * FAT_Struct->NumFATs -
                                         (FAT_Struct->RootEntriesCount * 32 + FAT_Struct->BytesPerSector - 1) /
                                         FAT_Struct->BytesPerSector) / FAT_Struct->SectorsPerCluster;
+
+        FAT_Struct->RootDirectory_NumSectors    = FAT_Struct->Cluster2_StartSector - FAT_Struct->RootDirectory_StartSector;                                        
 
 
     }
@@ -102,7 +109,7 @@ uint8_t FAT_Mount(FATmini_t* FAT_Struct) {
 
         FAT_Struct->Cluster2_StartSector    = FAT_Struct->FAT_StartSector + FAT_Struct->FAT_NumSectors;
 
-        FAT_Struct->RootDirectoryStartSector    =   FAT_Struct->Cluster2_StartSector +
+        FAT_Struct->RootDirectory_StartSector    =   FAT_Struct->Cluster2_StartSector +
                                                     ((FAT_Struct->FAT.FAT32.RootCluster - 2) *
                                                     FAT_Struct->SectorsPerCluster);
 
@@ -110,694 +117,653 @@ uint8_t FAT_Mount(FATmini_t* FAT_Struct) {
                                         FAT_Struct->FAT.FAT32.FAT_Size_32 * FAT_Struct->NumFATs) / 
                                         FAT_Struct->SectorsPerCluster;
 
+        FAT_Struct->RootDirectory_NumSectors    = 0;                                        
+
     }
 
     if(FAT_Struct->CountOfClusters <= 4085){
         FAT_Struct->FAT_Type = FAT_TYPE_12;
-        FAT_Struct->FAT_Type_String = "FAT12\0";
+        FAT_Struct->FAT_Type_String = "FAT12";
     }
     else if(FAT_Struct->CountOfClusters >= 4086 && FAT_Struct->CountOfClusters <= 65525){
         FAT_Struct->FAT_Type = FAT_TYPE_16;
-        FAT_Struct->FAT_Type_String = "FAT16\0";
+        FAT_Struct->FAT_Type_String = "FAT16";
     }
     else if(FAT_Struct->CountOfClusters >= 65526){
         FAT_Struct->FAT_Type = FAT_TYPE_32;
-        FAT_Struct->FAT_Type_String = "FAT32\0";
+        FAT_Struct->FAT_Type_String = "FAT32";
     }
     else{
         FAT_Struct->FAT_Type = FAT_TYPE_UNKNOWN;
         FAT_Struct->FAT_Type_String = "FAT UNKNOWN";
     }
 
-
-
     return 0; // Успешно скопировано в структуру!
 }
 
-/*
-uint32_t FAT_GetNextCluster(FAT_Instance_t* instance, uint32_t current_cluster) {
-    uint32_t phys_addr = 0;
+uint32_t FAT_GetNextCluster(FATmini_t* FAT_Struct, uint32_t Current_Cluster) {
     
     // === ВЕТКА 1: Чтение для FAT12 ===
-    if (instance->type == FAT_TYPE_12) {
-        uint8_t buf[2];
-        uint32_t fat_offset_bytes = (current_cluster * 3) / 2;
-        phys_addr = instance->flash_map.fat1_addr + fat_offset_bytes;
+    if (FAT_Struct->FAT_Type == FAT_TYPE_12) {
+        // 1. Вычисляем абсолютное смещение в байтах от начала таблицы FAT
+        uint32_t FAT_Offset_Byte = (Current_Cluster * 3) / 2;
         
-        instance->disk_read(buf, phys_addr, 2);
+        // 2. Вычисляем относительные номера секторов (0, 1, 2...) внутри FAT
+        uint32_t FAT_Sector1 = FAT_Offset_Byte / 512;
+        uint32_t FAT_Sector2 = (FAT_Offset_Byte + 1) / 512;
         
-        uint16_t raw_entry = (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
+        // Смещение первого байта внутри сектора
+        uint32_t Local_Offset_Byte = FAT_Offset_Byte % 512;
         
-        if (current_cluster % 2 == 0) {
-            return raw_entry & 0x0FFF; // Четный кластер — берем младшие 12 бит
+        // Абсолютные номера секторов на диске (LBA)
+        // Предполагается, что fat1_addr хранит номер стартового сектора FAT
+        uint32_t Sector1 = FAT_Struct->FAT_StartSector + FAT_Sector1;
+        uint32_t Sector2 = FAT_Struct->FAT_StartSector + FAT_Sector2;
+
+        uint8_t byte0 = 0;
+        uint8_t byte1 = 0;
+
+        // 3. Читаем первый сектор (только если его еще нет в кэше)
+        FAT_Struct->DiskRead(Sector1, lba_buffer);
+        byte0 = lba_buffer[Local_Offset_Byte];
+
+        // 4. Проверяем стык секторов
+        if (Sector1 == Sector2) {
+            // Оба байта в одном секторе — берем второй байт из этого же буфера
+            byte1 = lba_buffer[Local_Offset_Byte + 1];
+        } 
+        else {
+            FAT_Struct->DiskRead(Sector2, lba_buffer);
+            byte1 = lba_buffer[0]; // Первый байт нового сектора
+        }
+
+        // 5. Собираем 16-битное значение
+        uint16_t raw_entry = (uint16_t)byte0 | ((uint16_t)byte1 << 8);
+        
+        // 6. Выделяем 12 бит в зависимости от четности кластера
+        if (Current_Cluster % 2 == 0) {
+            return raw_entry & 0x0FFF; // Четный кластер — младшие 12 бит
         } else {
-            return raw_entry >> 4;     // Нечетный кластер — берем старшие 12 бит
+            return raw_entry >> 4;     // Нечетный кластер — старшие 12 бит
         }
     }
-    // === ВЕТКА 2: Чтение для FAT16 ===
-    else if (instance->type == FAT_TYPE_16) {
-        uint8_t buf[2];
-        uint32_t fat_offset_bytes = current_cluster * 2;
-        phys_addr = instance->flash_map.fat1_addr + fat_offset_bytes;
+
+    if (FAT_Struct->FAT_Type == FAT_TYPE_16) {
+        // Каждая запись занимает ровно 2 байта. Стыков секторов быть не может, 
+        // так как 512 байт делится на 2 без остатка (в секторе ровно 256 записей).
+        uint32_t FAT_Offset_Byte = Current_Cluster * 2;
+        uint32_t Target_Sector = FAT_Struct->FAT_StartSector + (FAT_Offset_Byte / 512);
+        uint32_t Local_Offset = FAT_Offset_Byte % 512;
+
         
-        instance->disk_read(buf, phys_addr, 2);
-        
-        return (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
+        FAT_Struct->DiskRead(Target_Sector, lba_buffer);
+
+        // Читаем 16-битное значение побайтово во избежание Alignment Fault
+        uint16_t next_cluster = (uint16_t)lba_buffer[Local_Offset] | 
+                               ((uint16_t)lba_buffer[Local_Offset + 1] << 8);
+        return next_cluster;
     }
-    // === ВЕТКА 3: Чтение для FAT32 ===
-    else if (instance->type == FAT_TYPE_32) {
-        uint8_t buf[4];
-        uint32_t fat_offset_bytes = current_cluster * 4;
-        phys_addr = instance->flash_map.fat1_addr + fat_offset_bytes;
+
+    else if (FAT_Struct->FAT_Type == FAT_TYPE_32) {
+        // Каждая запись занимает ровно 4 байта. Стыков секторов также нет,
+        // так как 512 делится на 4 без остатка (в секторе ровно 128 записей).
+        uint32_t FAT_Offset_Byte = Current_Cluster * 4;
+        uint32_t Target_Sector = FAT_Struct->FAT_StartSector + (FAT_Offset_Byte / 512);
+        uint32_t Local_Offset = FAT_Offset_Byte % 512;
+
+        FAT_Struct->DiskRead(Target_Sector, lba_buffer);
+
+        // Собираем 32-битное значение побайтово
+        uint32_t next_cluster = (uint32_t)lba_buffer[Local_Offset]       |
+                               ((uint32_t)lba_buffer[Local_Offset + 1] << 8)  |
+                               ((uint32_t)lba_buffer[Local_Offset + 2] << 16) |
+                               ((uint32_t)lba_buffer[Local_Offset + 3] << 24);
         
-        instance->disk_read(buf, phys_addr, 4);
-        
-        uint32_t raw_entry = (uint32_t)buf[0] | 
-                             ((uint32_t)buf[1] << 8) |
-                             ((uint32_t)buf[2] << 16) | 
-                             ((uint32_t)buf[3] << 24);
-                             
-        return raw_entry & 0x0FFFFFFF; // В FAT32 используются только 28 бит
+        // В FAT32 старшие 4 бита зарезервированы, их необходимо маскировать
+        return next_cluster & 0x0FFFFFFF;
     }
     
     return 0x0FFFFFFF; // Если тип неизвестен, возвращаем универсальный 32-битный конец файла
 }
 
-uint32_t FAT_FindFreeCluster(FAT_Instance_t* instance) {
-    uint8_t __attribute__((aligned(4))) fat_buf[instance->bpb.bytes_per_sector];
+bool FAT_FindFile(FATmini_t* FAT_Struct, char* FileName) {
+    char compiled_lfn[256] = {0};
+    bool lfn_is_valid = false;
     
-    // 1. Узнаем размер таблицы FAT в секторах
-    uint32_t fat_size_sectors = (instance->bpb.sectors_per_fat_16 != 0) ? 
-                                 instance->bpb.sectors_per_fat_16 : instance->bpb.ext.fat32.sectors_per_fat_32;
+    // Статический массив смещений для побайтового чтения символов LFN
+    static const uint8_t lfn_offsets[13] = {1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30};
 
-    uint32_t current_cluster = 0; // Счётчик кластеров, который мы увеличиваем по мере чтения байт
+    if(FAT_Struct->FAT_Type == FAT_TYPE_32){
+        // --- УНИВЕРСАЛЬНЫЙ ПОСЛЕДОВАТЕЛЬНЫЙ ОБХОД ДЛЯ FAT32 ---
 
-    // LBA цикл: бежим строго по секторам таблицы FAT от начала до конца
-    for (uint32_t sector_idx = 0; sector_idx < fat_size_sectors; sector_idx++) {
-        
-        // Читаем текущий сектор таблицы FAT целиком в буфер
-        uint32_t target_fat_addr = instance->flash_map.fat1_addr + (sector_idx * instance->bpb.bytes_per_sector);
-        instance->disk_read(fat_buf, target_fat_addr, instance->bpb.bytes_per_sector);
-
-        // Внутренний цикл: разбираем байты внутри прочитанного сектора
-        uint32_t byte_offset = 0;
-        while (byte_offset < instance->bpb.bytes_per_sector) {
-            uint32_t cluster_value = 0;
-
-            // === ВЕТКА FAT12 ===
-            if (instance->type == FAT_TYPE_12) {
-                // Защита от стыка: если мы на последнем байте сектора, используем безопасное чтение
-                if (byte_offset == (instance->bpb.bytes_per_sector - 1)) {
-                    cluster_value = FAT_GetNextCluster(instance, current_cluster);
-                    byte_offset += 1; // Стык занимает 1.5 байта, но в этом секторе остался всего 1 байт
-                } 
-                else {
-                    uint16_t raw_entry = (uint16_t)fat_buf[byte_offset] | ((uint16_t)fat_buf[byte_offset + 1] << 8);
-                    cluster_value = (current_cluster & 1) ? (raw_entry >> 4) : (raw_entry & 0x0FFF);
-                    // Каждые 2 кластера занимают ровно 3 байта. 
-                    // Если текущий кластер четный, мы проверили только его, но смещаться по байтам еще рано (сдвиг будет на нечетном).
-                    // Для простоты: шагаем по 1.5 байта в среднем.
-                    if (current_cluster & 1) {
-                        byte_offset += 2; // Шаг после нечетного
-                    } else {
-                        byte_offset += 1; // Шаг после четного
-                    }
-                }
-            }
-            // === ВЕТКА FAT16 ===
-            else if (instance->type == FAT_TYPE_16) {
-                cluster_value = (uint16_t)fat_buf[byte_offset] | ((uint16_t)fat_buf[byte_offset + 1] << 8);
-                byte_offset += 2; // Каждая запись строго 2 байта
-            }
-            // === ВЕТКА FAT32 ===
-            else { 
-                cluster_value = ((uint32_t)fat_buf[byte_offset]) | 
-                                ((uint32_t)fat_buf[byte_offset + 1] << 8) |
-                                ((uint32_t)fat_buf[byte_offset + 2] << 16) | 
-                                ((uint32_t)fat_buf[byte_offset + 3] << 24);
-                cluster_value &= 0x0FFFFFFF;
-                byte_offset += 4; // Каждая запись строго 4 байта
-            }
-
-            // Кластеры 0 и 1 зарезервированы системой, их проверять на "свободность" нельзя
-            if (current_cluster >= 2 && cluster_value == 0) {
-                return current_cluster; // Нашли свободный кластер!
-            }
-
-            current_cluster++; // Переходим к следующему номеру кластера
-        }
-    }
-
-    return 0; // Свободных кластеров во всей таблице FAT не найдено
-}
-
-void FAT_WriteClusterValue(FAT_Instance_t* instance, uint32_t cluster, uint32_t value) {
-    // Выделяем всего 4 байта в памяти вместо 512!
-    uint8_t raw[4] = {0}; 
-    uint32_t fat_offset_bytes = 0;
-
-    // === ВЕТКА 1: FAT12 ===
-    if (instance->type == FAT_TYPE_12) {
-        fat_offset_bytes = (cluster * 3) / 2;
-        uint32_t phys_addr_fat1 = instance->flash_map.fat1_addr + fat_offset_bytes;
-        uint32_t phys_addr_fat2 = instance->flash_map.fat2_addr + fat_offset_bytes;
-
-        // Читаем 4 байта (захватываем целевую запись и кусочек данных за ней)
-        instance->disk_read(raw, phys_addr_fat1, 4);
-
-        // Нам нужны только первые 2 байта из прочитанных 4-х для модификации записи
-        uint16_t raw_entry = (uint16_t)raw[0] | ((uint16_t)raw[1] << 8);
-        if (cluster % 2 == 0) {
-            raw_entry = (raw_entry & 0xF000) | (value & 0x0FFF);
-        } else {
-            raw_entry = (raw_entry & 0x000F) | ((value & 0x0FFF) << 4);
-        }
-
-        raw[0] = (uint8_t)(raw_entry & 0xFF);
-        raw[1] = (uint8_t)((raw_entry >> 8) & 0xFF);
-
-        // Перезаписываем обновленные 4 байта обратно (хвост пишется без изменений)
-        instance->disk_write(raw, phys_addr_fat1, 4);
-        instance->disk_write(raw, phys_addr_fat2, 4);
-    }
-
-    // === ВЕТКА 2: FAT16 ===
-    else if (instance->type == FAT_TYPE_16) {
-        fat_offset_bytes = cluster * 2;
-        uint32_t phys_addr_fat1 = instance->flash_map.fat1_addr + fat_offset_bytes;
-        uint32_t phys_addr_fat2 = instance->flash_map.fat2_addr + fat_offset_bytes;
-
-        // Читаем 4 байта (захватываем нужный кластер и следующий за ним)
-        instance->disk_read(raw, phys_addr_fat1, 4);
-
-        // Модифицируем только первые 2 байта, отвечающие за наш кластер
-        raw[0] = (uint8_t)(value & 0xFF);
-        raw[1] = (uint8_t)((value >> 8) & 0xFF);
-
-        // Записываем 4 байта обратно
-        instance->disk_write(raw, phys_addr_fat1, 4);
-        instance->disk_write(raw, phys_addr_fat2, 4);
-    }
-
-    // === ВЕТКА 3: FAT32 ===
-    else if (instance->type == FAT_TYPE_32) {
-        fat_offset_bytes = cluster * 4;
-        uint32_t phys_addr_fat1 = instance->flash_map.fat1_addr + fat_offset_bytes;
-        uint32_t phys_addr_fat2 = instance->flash_map.fat2_addr + fat_offset_bytes;
-
-        // Читаем честные 4 байта записи FAT32
-        instance->disk_read(raw, phys_addr_fat1, 4);
-
-        uint32_t old_value = ((uint32_t)raw[0]) | ((uint32_t)raw[1] << 8) |
-                             ((uint32_t)raw[2] << 16) | ((uint32_t)raw[3] << 24);
-
-        // Сохраняем зарезервированные верхние 4 бита
-        uint32_t final_value = (old_value & 0xF0000000) | (value & 0x0FFFFFFF);
-
-        raw[0] = (uint8_t)(final_value & 0xFF);
-        raw[1] = (uint8_t)((final_value >> 8) & 0xFF);
-        raw[2] = (uint8_t)((final_value >> 16) & 0xFF);
-        raw[3] = (uint8_t)((final_value >> 24) & 0xFF);
-
-        instance->disk_write(raw, phys_addr_fat1, 4);
-        instance->disk_write(raw, phys_addr_fat2, 4);
-    }
-}
-
-
-static inline bool char_compare_case_insensitive(char req_char, char flash_char) {
-    // Переводим в верхний регистр символ из запроса пользователя
-    if (req_char >= 'a' && req_char <= 'z') req_char -= 32;
-    
-    // ДОБАВЬ ЭТУ СТРОЧКУ: Переводим в верхний регистр символ, считанный с флешки!
-    if (flash_char >= 'a' && flash_char <= 'z') flash_char -= 32;
-    
-    return req_char == flash_char;
-}
-
-uint8_t FAT_FindFileByLongName(FAT_Instance_t* instance, const char* long_name){
-    // Проверяем, что нам передали живые указатели и имя не пустое
-    if (instance == NULL || instance->disk_read == NULL || long_name == NULL || long_name[0] == '\0') {
-        return 1; // Ошибка: неверные аргументы
-    }
-
-    // Сбрасываем параметры файла перед началом нового поиска
-    instance->current_file_cluster = 0;
-    instance->current_file_size = 0;
-    instance->is_file_open = false;
-
-    uint32_t bytes_sec = instance->bpb.bytes_per_sector;
-    
-    // Переменные для управления обходом каталога
-    uint32_t current_cluster = instance->current_dir_cluster;
-    uint32_t sector_offset = 0;
-    bool is_fixed_root = false;
-
-    // Выясняем, где именно на флешке искать записи
-    if (current_cluster == 0) {
-        // Мы в корневом каталоге!
-        if (instance->type == FAT_TYPE_32) {
-            // В FAT32 корень — это обычная цепочка кластеров
-            current_cluster = instance->bpb.ext.fat32.root_cluster;
-        } else {
-            // В FAT12/16 корень — это отдельная фиксированная область секторов
-            is_fixed_root = true;
-        }
-    }
-
-    // Сюда мы будем читать данные с диска (всего 1 сектор)
-    uint8_t __attribute__((aligned(4))) sector_buf[bytes_sec];
-
-    char lfn_buffer[256];
-    bool lfn_is_valid = false; // Флаг, что мы успешно зафиксировали цепочку LFN-записей
-
-    while ((is_fixed_root && sector_offset < instance->flash_map.root_dir_sectors) || 
-           (!is_fixed_root && current_cluster >= 2 && current_cluster < 0x0FFFFFF8)) 
-    {
-        uint32_t sector_addr = 0;
-
-        if (is_fixed_root) {
-            // Случай А: Читаем фиксированный корень FAT12/16
-            sector_addr = instance->flash_map.root_dir_addr + (sector_offset * bytes_sec);
-            sector_offset++;
-        } 
-        else {
-            // Случай Б: Читаем через цепочку кластеров (подпапки или корень FAT32)
+        for (uint32_t CurrentCluster = FAT_Struct->Directory.CurrentCluster; 
+             CurrentCluster < 0x0FFFFFF8 && CurrentCluster >= 2; 
+             CurrentCluster = FAT_GetNextCluster(FAT_Struct, CurrentCluster)) {
             
-            // Проверяем, не прочитали ли мы весь текущий кластер
-            if (sector_offset >= instance->bpb.sectors_per_cluster) {
-                // Кластер прочитан полностью! Переходим к следующему по таблице FAT
-                current_cluster = FAT_GetNextCluster(instance, current_cluster);
-                sector_offset = 0; // Сбрасываем счетчик секторов для нового кластера
-                
-                // Сразу проверяем новый кластер, чтобы не высчитывать неверный адрес
-                continue; 
-            }
+            // Читаем все сектора внутри текущего кластера
+            for (uint8_t sector = 0; sector < FAT_Struct->SectorsPerCluster; sector++) {
+                uint32_t CurrentSector = FAT_Struct->Cluster2_StartSector + 
+                                         ((CurrentCluster - 2) * FAT_Struct->SectorsPerCluster) + sector;
+                FAT_Struct->DiskRead(CurrentSector, lba_buffer);
 
-            // Вычисляем физический адрес сектора внутри текущего кластера
-            uint32_t cluster_size_bytes = instance->bpb.sectors_per_cluster * bytes_sec;
-            uint32_t cluster_start_addr = instance->flash_map.data_addr + ((current_cluster - 2) * cluster_size_bytes);
+                for (uint8_t block = 0; block < 16; block++) {
+                    uint8_t* CurrentBlock = &lba_buffer[block * 32];
 
-            sector_addr = cluster_start_addr + (sector_offset * bytes_sec);
-            sector_offset++;
-        }
+                    // --- НАЧАЛО ПАРСИНГА БЛОКА ---
+                    if (CurrentBlock[0] == 0x00){ return false; } // Конец каталога
+                    if (CurrentBlock[0] == 0xE5) { lfn_is_valid = false; continue; } // Удален
 
-        // Читаем вычисленный сектор с диска в буфер
-        instance->disk_read(sector_buf, sector_addr, bytes_sec);
-        lfn_is_valid = false;
+                    uint8_t attr = CurrentBlock[11];
 
-        // Вычисляем, сколько записей помещается в один сектор
-        uint16_t entries_per_sector = bytes_sec / 32;
+                    // ИСПРАВЛЕНО: Сначала строго проверяем на LFN (0x0F)
+                    if (attr == 0x0F) {
+                        uint8_t seq = CurrentBlock[0];
+                        if (seq & 0x40) {
+                            seq &= ~0x40;
+                            if (seq <= 20) {
+                                lfn_is_valid = true;
+                                memset(compiled_lfn, 0, sizeof(compiled_lfn));
+                            }
+                        }
+                        if (lfn_is_valid && seq >= 1) {
+                            int char_offset = (seq - 1) * 13;
+                            for (uint8_t k = 0; k < 13; k++) {
+                                int total_offset = char_offset + k;
 
-        // Перебираем каждую 32-байтную запись в текущем секторе
-        for (uint16_t i = 0; i < entries_per_sector; i++) {
-            uint32_t offset = i * 32; // Смещение в байтах от начала буфера сектора
+                                if (total_offset >= 255) {
+                                    break;
+                                }
 
-            uint8_t first_byte = sector_buf[offset];      // Первый байт имени (определяет статус записи)
-            uint8_t attr       = sector_buf[offset + 11]; // Смещение 11: Атрибуты файла
+                                uint8_t low_byte  = CurrentBlock[lfn_offsets[k]];
+                                uint8_t high_byte = CurrentBlock[lfn_offsets[k] + 1];
 
-            // 1. Проверка на конец каталога
-            if (first_byte == 0x00) {
-                return 2; // Код 2: Свободная запись, и дальше записей НЕТ. Поиск окончен, файла нет.
-            }
+                                if ((low_byte == 0x00 && high_byte == 0x00) || 
+                                    (low_byte == 0xFF && high_byte == 0xFF)) {
+                                    break;
+                                }
 
-            // 2. Проверка на удаленный файл
-            if (first_byte == 0xE5) {
-                continue; // Запись удалена, просто переходим к следующей записи в этом секторе
-            }
-
-            // 3. Проверка на LFN-запись (длинное имя)
-            // 3. Проверка на LFN-запись (длинное имя)
-            if (attr == 0x0F) {
-                uint8_t sequence_num = first_byte;
-
-                // Если это стартовая (финальная на диске) запись длинного имени, у неё взведен бит 0x40
-                if (sequence_num & 0x40) {
-                    sequence_num &= ~0x40; // Очищаем флаг 0x40
-                    
-                    // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Полностью зануляем буфер перед сборкой новой строки!
-                    for (int b = 0; b < 256; b++) {
-                        lfn_buffer[b] = '\0';
+                                if (high_byte == 0x00) {
+                                    compiled_lfn[total_offset] = (char)low_byte;
+                                } else {
+                                    compiled_lfn[total_offset] = '?';
+                                }
+                            }
+                        }
+                        continue; // Уходим на следующий блок, накапливая LFN
                     }
-                    
-                    uint16_t estimated_len = sequence_num * 13;
-                    if (estimated_len > 255) estimated_len = 255;
-                    lfn_buffer[estimated_len] = '\0';
-                    lfn_is_valid = true; 
-                }
 
-                // Извлекаем 13 символов из текущей LFN-записи
-                if (sequence_num > 0 && sequence_num <= 20 && lfn_is_valid) {
-                    uint16_t string_start_idx = (sequence_num - 1) * 13;
+                    // ИСПРАВЛЕНО: Только если это НЕ LFN, проверяем маску метки тома (Volume ID)
+                    if (attr & 0x08) { lfn_is_valid = false; continue; } 
 
-                    for (int c = 0; c < 13; c++) {
-                        if (string_start_idx + c < 255) {
-                            lfn_buffer[string_start_idx + c] = (char)sector_buf[offset + lfn_offsets[c]];
+                    // --- ПРОВЕРКА СОВПАДЕНИЯ ИМЕНИ ---
+                    bool is_match = false;
+
+                    // 1. Сначала проверяем совпадение по собранному LFN имени
+                    if (lfn_is_valid && compiled_lfn[0] != '\0') {
+                        int idx = 0;
+                        while (FileName[idx] && compiled_lfn[idx] && 
+                               (tolower((unsigned char)FileName[idx]) == tolower((unsigned char)compiled_lfn[idx]))) {
+                            idx++;
+                        }
+                        if (FileName[idx] == '\0' && compiled_lfn[idx] == '\0') {
+                            is_match = true;
                         }
                     }
-                }
 
-                continue; // Мгновенно уходим на следующую запись (к DOS-записи файла)
-            }
+                    // 2. Если по LFN не совпало, собираем и проверяем SFN (короткое имя)
+                    if (!is_match) {
+                        char sfn_name[13];
+                        int p = 0;
 
-            // ================================================================
-            // МЫ ДОШЛИ ДО DOS-ЗАПИСИ ФАЙЛА (СВЕРКА ИМЕНИ)
-            // ================================================================
-            bool file_matched = false;
+                        for (int i = 0; i < 8; i++) {
+                            if (CurrentBlock[i] != ' ') {
+                                sfn_name[p++] = (char)CurrentBlock[i];
+                            }
+                        }
 
-            // Вариант А: Перед файлом была цепочка LFN, проверяем длинное имя
-            if (lfn_is_valid) {
-                uint16_t idx = 0;
-                bool lfn_match = true;
+                        if (CurrentBlock[8] != ' ') {
+                            sfn_name[p++] = '.';
+                            for (int i = 8; i < 11; i++) {
+                                if (CurrentBlock[i] != ' ') {
+                                    sfn_name[p++] = (char)CurrentBlock[i];
+                                }
+                            }
+                        }
+                        sfn_name[p] = '\0';
 
-                // Сверяем строго до конца имени запроса пользователя
-                while (long_name[idx] != '\0') {
-                    if (!char_compare_case_insensitive(long_name[idx], lfn_buffer[idx])) {
-                        lfn_match = false;
-                        break;
+                        int idx = 0;
+                        while (FileName[idx] && sfn_name[idx] && 
+                               (tolower((unsigned char)FileName[idx]) == tolower((unsigned char)sfn_name[idx]))) {
+                            idx++;
+                        }
+                        if (FileName[idx] == '\0' && sfn_name[idx] == '\0') {
+                            is_match = true;
+                        }
                     }
-                    idx++;
-                }
-                
-                // Если имя совпало, но строка на флешке оказалась длиннее — это чужой файл!
-                if (lfn_match && lfn_buffer[idx] != '\0') {
-                    lfn_match = false;
-                }
 
-                if (lfn_match) {
-                    file_matched = true;
-                }
-            }
+                    // --- ИЗВЛЕЧЕНИЕ МЕТАДАННЫХ ПРИ СОВПАДЕНИИ ---
+                    if (is_match) {
+                        FAT_Struct->Directory.Attr = attr; 
+                        
+                        uint32_t cluster_hi = ((uint32_t)CurrentBlock[21] << 8) | CurrentBlock[20];
+                        uint32_t cluster_lo = ((uint32_t)CurrentBlock[27] << 8) | CurrentBlock[26];
+                        
+                        FAT_Struct->Directory.FirstCluster = (cluster_hi << 16) | cluster_lo;
 
-            // Вариант Б: Длинное имя не совпало или его не было — проверяем короткое имя (SFN 8.3)
-            if (!file_matched) {
-                char sfn_name[13]; // Временный буфер для сборки "чистого" DOS-имени
-                uint16_t sfn_len = 0;
+                        uint32_t file_size = ((uint32_t)CurrentBlock[31] << 24) |
+                                             ((uint32_t)CurrentBlock[30] << 16) |
+                                             ((uint32_t)CurrentBlock[29] << 8)  |
+                                             CurrentBlock[28];
 
-                // 1. Собираем основное имя (8 байт), отбрасывая пробелы в конце
-                for (int n = 0; n < 8; n++) {
-                    char c = (char)sector_buf[offset + n];
-                    if (c != ' ') {
-                        sfn_name[sfn_len++] = c;
+                        FAT_Struct->Directory.FileSize = file_size;
+
+                        return true; 
                     }
-                }
 
-                // 2. Читаем 3 байта расширения
-                char ext1 = (char)sector_buf[offset + 8];
-                char ext2 = (char)sector_buf[offset + 9];
-                char ext3 = (char)sector_buf[offset + 10];
-
-                // Если расширение не пустое, добавляем точку и символы расширения
-                if (ext1 != ' ' || ext2 != ' ' || ext3 != ' ') {
-                    sfn_name[sfn_len++] = '.';
-                    if (ext1 != ' ') sfn_name[sfn_len++] = ext1;
-                    if (ext2 != ' ') sfn_name[sfn_len++] = ext2;
-                    if (ext3 != ' ') sfn_name[sfn_len++] = ext3;
-                }
-                sfn_name[sfn_len] = '\0'; // Завершаем собранную строку
-
-                // 3. Прямое посимвольное сравнение собранной DOS-строки с запросом пользователя
-                uint16_t idx = 0;
-                bool sfn_match = true;
-                while (long_name[idx] != '\0' || sfn_name[idx] != '\0') {
-                    if (!char_compare_case_insensitive(long_name[idx], sfn_name[idx])) {
-                        sfn_match = false;
-                        break;
-                    }
-                    idx++;
-                }
-
-                if (sfn_match) {
-                    file_matched = true;
+                    lfn_is_valid = false;
+                    // --- КОНЕЦ ПАРСИНГА БЛОКА ---
                 }
             }
+        }
+    }
 
-            // Финал: если файл подошел по SFN или LFN, забираем его данные
-            if (file_matched) {
-                uint16_t cluster_low = ((uint16_t)sector_buf[offset + 26]) | ((uint16_t)sector_buf[offset + 27] << 8);
-                uint16_t cluster_high = 0;
-                
-                if (instance->type == FAT_TYPE_32) {
-                    cluster_high = ((uint16_t)sector_buf[offset + 20]) | ((uint16_t)sector_buf[offset + 21] << 8);
-                }
-
-                instance->current_file_cluster = ((uint32_t)cluster_high << 16) | cluster_low;
-
-                instance->current_file_size = ((uint32_t)sector_buf[offset + 28]) |
-                                              ((uint32_t)sector_buf[offset + 29] << 8) |
-                                              ((uint32_t)sector_buf[offset + 30] << 16) |
-                                              ((uint32_t)sector_buf[offset + 31] << 24);
-                
-                instance->current_file_attr = attr; 
-                instance->current_file_entry_addr = sector_addr + offset;
-                instance->is_file_open = true; 
-
-                return 0; // Успех!
-            }
-
-            // ГАРАНТИРОВАННЫЙ СБРОС: Если текущий файл не подошел, сбрасываем флаг LFN 
-            // перед тем, как перейти к следующей 32-байтной записи в секторе
-            lfn_is_valid = false;
-        } // Конец цикла по записям сектора
+    else {
+        // --- ОБХОД ДЛЯ FAT12 / FAT16 ---
         
-        // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Переносим инкремент сектора строго сюда!
-        // Он должен увеличиваться только тогда, когда мы ПОЛНОСТЬЮ разобрали все записи текущего сектора
-        sector_offset++; 
-    } // Конец цикла по секторам каталога
+        // 1. Проверяем по порядку: если стартовый кластер равен 0, значит мы ищем в КОРНЕ
+        if (FAT_Struct->Directory.CurrentCluster == 0) {
+            
+            for (uint32_t sector = 0; sector < FAT_Struct->RootDirectory_NumSectors; sector++) {
+                uint32_t CurrentSector = FAT_Struct->RootDirectory_StartSector + sector;
+                FAT_Struct->DiskRead(CurrentSector, lba_buffer);
 
-    return 2; // Код 2: Обошли весь каталог, но файл с таким именем не найден
+                // Перебираем все 16 блоков по 32 байта в секторе
+                for (uint8_t block = 0; block < 16; block++) {
+                    uint8_t* CurrentBlock = &lba_buffer[block * 32];
+                    
+                    // --- НАЧАЛО ПАРСИНГА БЛОКА ---
+                    if (CurrentBlock[0] == 0x00){ return false; } // Конец каталога
+                    if (CurrentBlock[0] == 0xE5) { lfn_is_valid = false; continue; } // Удален
+
+                    uint8_t attr = CurrentBlock[11];
+
+                    // ИСПРАВЛЕНО: Сначала строго проверяем на LFN (0x0F)
+                    if (attr == 0x0F) {
+                        uint8_t seq = CurrentBlock[0];
+                        if (seq & 0x40) {
+                            seq &= ~0x40;
+                            if (seq <= 20) {
+                                lfn_is_valid = true;
+                                memset(compiled_lfn, 0, sizeof(compiled_lfn));
+                            }
+                        }
+                        if (lfn_is_valid && seq >= 1) {
+                            int char_offset = (seq - 1) * 13;
+                            for (uint8_t k = 0; k < 13; k++) {
+                                int total_offset = char_offset + k;
+
+                                if (total_offset >= 255) {
+                                    break;
+                                }
+
+                                uint8_t low_byte  = CurrentBlock[lfn_offsets[k]];
+                                uint8_t high_byte = CurrentBlock[lfn_offsets[k] + 1];
+
+                                if ((low_byte == 0x00 && high_byte == 0x00) || 
+                                    (low_byte == 0xFF && high_byte == 0xFF)) {
+                                    break;
+                                }
+
+                                if (high_byte == 0x00) {
+                                    compiled_lfn[total_offset] = (char)low_byte;
+                                } else {
+                                    compiled_lfn[total_offset] = '?';
+                                }
+                            }
+                        }
+                        continue; // Уходим на накопление LFN-имени
+                    }
+
+                    // ИСПРАВЛЕНО: Только если это не LFN, отсекаем метку тома
+                    if (attr & 0x08) { lfn_is_valid = false; continue; } 
+
+                    // --- ПРОВЕРКА СОВПАДЕНИЯ ИМЕНИ ---
+                    bool is_match = false;
+
+                    if (lfn_is_valid && compiled_lfn[0] != '\0') {
+                        int idx = 0;
+                        while (FileName[idx] && compiled_lfn[idx] && 
+                            (tolower((unsigned char)FileName[idx]) == tolower((unsigned char)compiled_lfn[idx]))) {
+                            idx++;
+                        }
+                        if (FileName[idx] == '\0' && compiled_lfn[idx] == '\0') {
+                            is_match = true;
+                        }
+                    }
+
+                    if (!is_match) {
+                        char sfn_name[13];
+                        int p = 0;
+
+                        for (int i = 0; i < 8; i++) {
+                            if (CurrentBlock[i] != ' ') {
+                                sfn_name[p++] = (char)CurrentBlock[i];
+                            }
+                        }
+
+                        if (CurrentBlock[8] != ' ') {
+                            sfn_name[p++] = '.';
+                            for (int i = 8; i < 11; i++) {
+                                if (CurrentBlock[i] != ' ') {
+                                    sfn_name[p++] = (char)CurrentBlock[i];
+                                }
+                            }
+                        }
+                        sfn_name[p] = '\0';
+
+                        int idx = 0;
+                        while (FileName[idx] && sfn_name[idx] && 
+                            (tolower((unsigned char)FileName[idx]) == tolower((unsigned char)sfn_name[idx]))) {
+                            idx++;
+                        }
+                        if (FileName[idx] == '\0' && sfn_name[idx] == '\0') {
+                            is_match = true;
+                        }
+                    }
+
+                    // --- ИЗВЛЕЧЕНИЕ МЕТАДАННЫХ ПРИ СОВПАДЕНИИ ---
+                    if (is_match) {
+                        FAT_Struct->Directory.Attr = attr; 
+                        uint32_t cluster_hi = ((uint32_t)CurrentBlock[21] << 8) | CurrentBlock[20];
+                        uint32_t cluster_lo = ((uint32_t)CurrentBlock[27] << 8) | CurrentBlock[26];
+
+                        FAT_Struct->Directory.FirstCluster = (cluster_hi << 16) | cluster_lo;
+
+                        uint32_t file_size  =   ((uint32_t)CurrentBlock[31] << 24) |
+                                                ((uint32_t)CurrentBlock[30] << 16) |
+                                                ((uint32_t)CurrentBlock[29] << 8)  |
+                                                CurrentBlock[28];
+
+                        FAT_Struct->Directory.FileSize = file_size;
+
+                        return true; 
+                    }
+
+                    lfn_is_valid = false;
+                    // --- КОНЕЦ ПАРСИНГА БЛОКА ---
+                }
+            }
+        }
+        else {
+            uint32_t eoc_marker = (FAT_Struct->FAT_Type == FAT_TYPE_16) ? 0xFFF8 : 0x0FF8;
+            // 2. Сценарий Б: Мы зашли в ПОДПАПКУ в FAT12/16 (она обходится по кластерам)
+            for (uint32_t CurrentCluster = FAT_Struct->Directory.CurrentCluster; 
+                 CurrentCluster < eoc_marker && CurrentCluster >= 2; 
+                 CurrentCluster = FAT_GetNextCluster(FAT_Struct, CurrentCluster)) {
+                
+                for (uint8_t sector = 0; sector < FAT_Struct->SectorsPerCluster; sector++) {
+                    uint32_t CurrentSector = FAT_Struct->Cluster2_StartSector + 
+                                             ((CurrentCluster - 2) * FAT_Struct->SectorsPerCluster) + sector;
+                    FAT_Struct->DiskRead(CurrentSector, lba_buffer);
+
+                    for (uint8_t block = 0; block < 16; block++) {
+                        uint8_t* CurrentBlock = &lba_buffer[block * 32];
+
+                        // --- ПАРСИНГ БЛОКА ПОДПАПКИ FAT12/16 (абсолютно идентичен верхнему) ---
+                        if (CurrentBlock[0] == 0x00){ return false; }
+                        if (CurrentBlock[0] == 0xE5) { lfn_is_valid = false; continue; }
+
+                        uint8_t attr = CurrentBlock[11];
+
+                        if (attr == 0x0F) {
+                            uint8_t seq = CurrentBlock[0];
+                            if (seq & 0x40) {
+                                seq &= ~0x40;
+                                if (seq <= 20) {
+                                    lfn_is_valid = true;
+                                    memset(compiled_lfn, 0, sizeof(compiled_lfn));
+                                }
+                            }
+                            if (lfn_is_valid && seq >= 1) {
+                                int char_offset = (seq - 1) * 13;
+                                for (uint8_t k = 0; k < 13; k++) {
+                                    int total_offset = char_offset + k;
+                                    if (total_offset >= 255) break;
+
+                                    uint8_t low_byte  = CurrentBlock[lfn_offsets[k]];
+                                    uint8_t high_byte = CurrentBlock[lfn_offsets[k] + 1];
+
+                                    if ((low_byte == 0x00 && high_byte == 0x00) || (low_byte == 0xFF && high_byte == 0xFF)) break;
+
+                                    if (high_byte == 0x00) {
+                                        compiled_lfn[total_offset] = (char)low_byte;
+                                    } else {
+                                        compiled_lfn[total_offset] = '?';
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+
+                        if (attr & 0x08) { lfn_is_valid = false; continue; } 
+
+                        bool is_match = false;
+                        if (lfn_is_valid && compiled_lfn[0] != '\0') {
+                            int idx = 0;
+                            while (FileName[idx] && compiled_lfn[idx] && (tolower((unsigned char)FileName[idx]) == tolower((unsigned char)compiled_lfn[idx]))) idx++;
+                            if (FileName[idx] == '\0' && compiled_lfn[idx] == '\0') is_match = true;
+                        }
+
+                        if (!is_match) {
+                            char sfn_name[13];
+                            int p = 0;
+                            for (int i = 0; i < 8; i++) if (CurrentBlock[i] != ' ') sfn_name[p++] = (char)CurrentBlock[i];
+                            if (CurrentBlock[8] != ' ') {
+                                sfn_name[p++] = '.';
+                                for (int i = 8; i < 11; i++) if (CurrentBlock[i] != ' ') sfn_name[p++] = (char)CurrentBlock[i];
+                            }
+                            sfn_name[p] = '\0';
+
+                            int idx = 0;
+                            while (FileName[idx] && sfn_name[idx] && (tolower((unsigned char)FileName[idx]) == tolower((unsigned char)sfn_name[idx]))) idx++;
+                            if (FileName[idx] == '\0' && sfn_name[idx] == '\0') is_match = true;
+                        }
+
+                        if (is_match) {
+                            FAT_Struct->Directory.Attr = attr; 
+                            
+                            uint32_t cluster_hi = ((uint32_t)CurrentBlock[21] << 8) | CurrentBlock[20];
+                            uint32_t cluster_lo = ((uint32_t)CurrentBlock[27] << 8) | CurrentBlock[26];
+                            
+                            FAT_Struct->Directory.FirstCluster = (cluster_hi << 16) | cluster_lo;
+                            
+                            uint32_t file_size  =   ((uint32_t)CurrentBlock[31] << 24) |
+                                                    ((uint32_t)CurrentBlock[30] << 16) |
+                                                    ((uint32_t)CurrentBlock[29] << 8)  |
+                                                    CurrentBlock[28];
+                            
+                            FAT_Struct->Directory.FileSize = file_size;
+                            
+                            return true;
+                        }
+                        
+                        lfn_is_valid = false;
+                    }
+                }
+            }
+        }
+    }
+
+    return false; // Файл не найден
 }
 
-uint8_t FAT_OpenFile(FAT_Instance_t* instance, const char* file_name) {
-    if (instance == NULL || instance->disk_read == NULL || file_name == NULL) {
-        return 1;
-    }
+bool FAT_OpenFile(FATmini_t* FAT_Struct, char* FileName) {
+    // 1. Вызываем поиск файла. 
+    // В FAT_Struct->Directory.CurrentCluster в этот момент уже должен лежать кластер текущей папки!
+    bool FoundFile = FAT_FindFile(FAT_Struct, FileName);
 
-    // --- ПОПЫТКА №1: Ищем файл/папку в текущей директории ---
-    uint8_t find_status = FAT_FindFileByLongName(instance, file_name);
-
-    // --- АВТОМАТИЧЕСКИЙ ОТКАТ В КОРЕНЬ ---
-    // Если в текущей папке ничего не нашли, но мы сидели не в корне,
-    // автоматически возвращаемся в корень диска и пробуем найти элемент там
-    if (find_status != 0 && instance->current_dir_cluster != 0) {
-        instance->current_dir_cluster = 0; // Сбрасываем папку в корень
-        find_status = FAT_FindFileByLongName(instance, file_name); // Пробуем найти снова
-    }
-
-    // Если элемент не найден ни там, ни там — возвращаем ошибку 2
-    if (find_status != 0) {
-        return find_status; 
-    }
-    
-    // --- ОБРАБОТКА РЕЗУЛЬТАТА ПОИСКА ---
-    if (instance->current_file_attr == 0x10) {
-        // ЭТО ПАПКА! 
-        // Переключаем рабочий каталог на её кластер. 
-        // Следующие поиски будут происходить уже внутри этой папки.
-        instance->current_file_size = 0; 
-        instance->current_dir_cluster = instance->current_file_cluster;
+    // 2. Если элемент найден, проверяем его метаданные
+    if (FoundFile == true) {
         
-        // Папку нельзя читать как текстовый файл через функцию ReadFileData
-        instance->is_file_open = false; 
+        // ЗАЩИТА: Если нашли папку вместо файла — выходим с ошибкой
+        if (FAT_Struct->Directory.Attr & 0x10) {
+            return false; 
+        }
+
+        // Устанавливаем указатель текущей побайтовой позиции в 0 (начало файла)
+        FAT_Struct->Directory.CurrentPosition = 0;
+        
+        // Переводим переменную CurrentCluster из режима "кластер папки, где искали"
+        // в режим "кластер файла, который мы сейчас будем читать"
+        FAT_Struct->Directory.CurrentCluster = FAT_Struct->Directory.FirstCluster;
+    }
+
+    return FoundFile; 
+}
+
+bool FAT_OpenDirectory(FATmini_t* FAT_Struct, char* DirName) {
+    // 1. Ищем папку внутри текущего каталога
+    bool Found = FAT_FindFile(FAT_Struct, DirName);
+
+    // 2. Если нашли, проверяем, что это точно папка
+    if (Found == true) {
+        if (FAT_Struct->Directory.Attr & 0x10) {
+            
+            // ИСПРАВЛЕНО: Переключаем компас поиска на кластер этой новой папки.
+            // Теперь следующий вызов FAT_FindFile начнет искать файлы именно внутри неё!
+            FAT_Struct->Directory.CurrentCluster = FAT_Struct->Directory.FirstCluster;
+            
+            return true; // Успешно вошли в папку
+        }
+    }
+    return false; // Не нашли или это оказался файл
+}
+
+void FAT_ReturnRootDirectory(FATmini_t* FAT_Struct) {
+    // Проверяем по порядку тип файловой системы на соответствие вашему enum из FAT_Mount
+    if (FAT_Struct->FAT_Type == FAT_TYPE_32) {
+        // Для FAT32 возвращаем указатели на базовый корневой кластер
+        FAT_Struct->Directory.FirstCluster   = FAT_Struct->FAT.FAT32.RootCluster;
+        FAT_Struct->Directory.CurrentCluster = FAT_Struct->FAT.FAT32.RootCluster;
     } 
     else {
-        // ЭТО ОБЫЧНЫЙ ФАЙЛ!
-        // Инициализируем указатели для чтения порциями
-        instance->current_file_position = 0;
-        instance->current_cluster_pointer = instance->current_file_cluster;
-        instance->is_file_open = true;
+        // Для FAT12 и FAT16 корнем на диске является маркер 0
+        FAT_Struct->Directory.FirstCluster   = 0;
+        FAT_Struct->Directory.CurrentCluster = 0;
     }
+
+    // Сбрасываем позицию и размер, так как в корне мы ищем новые элементы с нуля
+    FAT_Struct->Directory.CurrentPosition = 0;
+    FAT_Struct->Directory.FileSize        = 0;
     
-    return 0; // Успешно открыто!
+    // Выставляем атрибут директории (папки), так как корень — это папка
+    FAT_Struct->Directory.Attr            = 0x10; 
 }
 
-uint32_t FAT_ReadFileData(FAT_Instance_t* instance, uint8_t* out_buffer, uint32_t start_byte, uint32_t bytes_to_read) {
-    // 1. Проверка «защиты от дурака»
-    if (instance == NULL || instance->disk_read == NULL || out_buffer == NULL || bytes_to_read == 0 || !instance->is_file_open) {
-        return 0;
+bool FAT_ReadFile(FATmini_t* FAT_Struct, uint8_t* OutBuffer, uint32_t StartByte, uint32_t Length) {
+    // Проверка входных данных: если структуры нет, буфер пустой или длина 0 — выходим
+    if (FAT_Struct == 0 || OutBuffer == 0 || Length == 0) {
+        return false;
     }
 
-    // 2. Если точка старта уже за концом файла — читать нечего
-    if (start_byte >= instance->current_file_size) {
-        return 0; 
-    }
+    // Определяем, что перед нами: файл или папка (проверяем бит директории 0x10)
+    bool IsDirectory = (FAT_Struct->Directory.Attr & 0x10) ? true : false;
 
-    // 3. Корректируем длину: нельзя прочитать больше, чем осталось до конца файла
-    uint32_t max_available = instance->current_file_size - start_byte;
-    if (bytes_to_read > max_available) {
-        bytes_to_read = max_available;
-    }
-
-    // Заготовки констант размеров
-    uint32_t bytes_sec = instance->bpb.bytes_per_sector;
-    uint32_t cluster_size_bytes = instance->bpb.sectors_per_cluster * bytes_sec;
-
-    // --- УМНАЯ ПЕРЕМОТКА (SEEK) ---
-    if (start_byte != instance->current_file_position) {
-        instance->current_file_position = start_byte;
-        instance->current_cluster_pointer = instance->current_file_cluster; // Возврат на старт файла
-        
-        // Сколько полных кластеров от начала нужно отсчитать
-        uint32_t clusters_to_skip = start_byte / cluster_size_bytes;
-        
-        for (uint32_t i = 0; i < clusters_to_skip; i++) {
-            uint32_t next_cluster = FAT_GetNextCluster(instance, instance->current_cluster_pointer);
-            
-            // Универсальная проверка на маркеры конца цепочки (EOF) для всех FAT
-            if (next_cluster >= 0x0FFFFFF8 || (instance->type == FAT_TYPE_16 && next_cluster >= 0xFFF8) || (instance->type == FAT_TYPE_12 && next_cluster >= 0x0FF8)) {
-                return 0; // Цепочка повреждена или файл неожиданно кончился
-            }
-            instance->current_cluster_pointer = next_cluster;
+    // 1. ОГРАНИЧЕНИЕ РАЗМЕРА (Применяется строго для файлов)
+    if (IsDirectory == false) {
+        // Если точка старта уже за пределами файла — читать нечего
+        if (StartByte >= FAT_Struct->Directory.FileSize) {
+            return false;
+        }
+        // Если просят прочесть больше, чем осталось до конца файла, урезаем длину до реального остатка
+        if (StartByte + Length > FAT_Struct->Directory.FileSize) {
+            Length = FAT_Struct->Directory.FileSize - StartByte;
         }
     }
 
-    uint32_t total_bytes_copied = 0;
-    
-    // Временный буфер всего на ОДИН сектор (обычно 512 байт), а не 4096!
-    uint8_t __attribute__((aligned(4))) tmp_sector_buf[bytes_sec];
+    // Вычисляем размер одного кластера в байтах
+    uint32_t BytesPerCluster = FAT_Struct->SectorsPerCluster * FAT_Struct->BytesPerSector;
 
-    while (total_bytes_copied < bytes_to_read) {
-        // 1. Вычисляем текущее смещение внутри КЛАСТЕРА
-        uint32_t offset_in_cluster = instance->current_file_position % cluster_size_bytes;
+    // 2. НАВИГАЦИЯ ДО СТАРТОВОЙ ТОЧКИ (Промотка цепочки кластеров до StartByte)
+    // Начинаем отсчет с самого первого кластера файла/папки
+    uint32_t CurrentCluster = FAT_Struct->Directory.FirstCluster;
+    uint32_t ClustersToSkip = StartByte / BytesPerCluster; // Сколько кластеров нужно пропустить
+
+    // Смещение внутри целевого кластера, где начнется чтение
+    uint32_t ByteOffsetInCluster = StartByte % BytesPerCluster;
+
+    // Шагаем по таблице FAT до нужного кластера, где расположен StartByte
+    for (uint32_t i = 0; i < ClustersToSkip; i++) {
+        CurrentCluster = FAT_GetNextCluster(FAT_Struct, CurrentCluster);
         
-        // 2. На основе смещения в кластере находим конкретный СЕКТОР и смещение внутри него
-        uint32_t sector_in_cluster = offset_in_cluster / bytes_sec;
-        uint32_t byte_offset_in_sector = offset_in_cluster % bytes_sec;
+        // Определяем маску конца цепочки (EOC) в зависимости от типа файловой системы
+        uint32_t EocMarker = (FAT_Struct->FAT_Type == FAT_TYPE_32) ? 0x0FFFFFF8 : 
+                             (FAT_Struct->FAT_Type == FAT_TYPE_16) ? 0xFFF8 : 0x0FF8;
 
-        // 3. Считаем физический адрес этого сектора на диске
-        uint32_t cluster_phys_addr = instance->flash_map.data_addr + 
-                                     ((instance->current_cluster_pointer - 2) * cluster_size_bytes);
-        uint32_t target_sector_addr = cluster_phys_addr + (sector_in_cluster * bytes_sec);
-
-        // 4. Считаем, сколько байт нужно прочитать на этом шаге
-        uint32_t bytes_needed = bytes_to_read - total_bytes_copied;
-        uint32_t bytes_available_in_sector = bytes_sec - byte_offset_in_sector;
-        uint32_t chunk_to_copy = (bytes_needed < bytes_available_in_sector) ? bytes_needed : bytes_available_in_sector;
-
-        // --- УМНАЯ ОПТИМИЗАЦИЯ ЧТЕНИЯ ---
-        if (byte_offset_in_sector == 0 && chunk_to_copy == bytes_sec) {
-            // Если нам нужно прочесть весь сектор целиком и мы стоим на его начале,
-            // читаем данные с флешки НАПРЯМУЮ в память пользователя, без промежуточных буферов!
-            instance->disk_read(&out_buffer[total_bytes_copied], target_sector_addr, bytes_sec);
-            total_bytes_copied += bytes_sec;
-            instance->current_file_position += bytes_sec;
-        } 
-        else {
-            // Если кусочек мелкий или невыровненный, читаем один сектор в темп-буфер
-            instance->disk_read(tmp_sector_buf, target_sector_addr, bytes_sec);
-            
-            // Копируем только полезную часть
-            for (uint32_t i = 0; i < chunk_to_copy; i++) {
-                out_buffer[total_bytes_copied] = tmp_sector_buf[byte_offset_in_sector + i];
-                total_bytes_copied++;
-            }
-            instance->current_file_position += chunk_to_copy;
+        if (CurrentCluster >= EocMarker || CurrentCluster < 2) {
+            return false; // Ошибка: StartByte указывает за пределы выделенной цепочки
         }
-        // 5. Проверяем: если мы дочитали текущий кластер до самого конца, 
-        // а пользователю нужно передать ещё данные — прыгаем на следующий кластер
-        if ((instance->current_file_position % cluster_size_bytes) == 0 && total_bytes_copied < bytes_to_read) {
-            uint32_t next_cluster = FAT_GetNextCluster(instance, instance->current_cluster_pointer);
-
-            // Проверка на маркеры конца файла (EOF) для всех типов FAT
-            if (next_cluster >= 0x0FFFFFF8 || 
-               (instance->type == FAT_TYPE_16 && next_cluster >= 0xFFF8) || 
-               (instance->type == FAT_TYPE_12 && next_cluster >= 0x0FF8)) {
-                break; // Цепочка кластеров закончилась, выходим из while
-            }
-            
-            instance->current_cluster_pointer = next_cluster;
-        }
-    } // Конец цикла while
-
-    return total_bytes_copied;
-
-}
-
-uint32_t FAT_WriteFileData(FAT_Instance_t* instance, const uint8_t* in_buffer, uint32_t start_byte, uint32_t bytes_to_write) {
-    if (instance == 0 || instance->disk_read == 0 || instance->disk_write == 0 || in_buffer == 0 || bytes_to_write == 0 || !instance->is_file_open) {
-        return 0;
     }
 
-    uint32_t bytes_per_sec = instance->bpb.bytes_per_sector;
-    uint32_t cluster_size_bytes = instance->bpb.sectors_per_cluster * bytes_per_sec; // 1024
+    // 3. ПОСЛЕДОВАТЕЛЬНЫЙ ЦИКЛ ЧТЕНИЯ ДАННЫХ
+    uint32_t BytesRead = 0;
 
-    // Временные указатели для прохода по цепочке
-    uint32_t current_cluster = instance->current_file_cluster;
-    uint32_t total_bytes_written = 0;
-    uint32_t current_pos = start_byte;
+    // Работаем в цикле, пока полностью не заберем Length байт
+    while (BytesRead < Length) {
+        
+        // Вычисляем индекс сектора внутри кластера и смещение байта внутри этого сектора
+        uint32_t SectorInCluster = ByteOffsetInCluster / FAT_Struct->BytesPerSector;
+        uint32_t ByteOffsetInSector = ByteOffsetInCluster % FAT_Struct->BytesPerSector;
 
-    // Сначала проматываем цепочку FAT до того кластера, куда попадает наш start_byte
-    uint32_t clusters_to_skip = start_byte / cluster_size_bytes;
-    for (uint32_t i = 0; i < clusters_to_skip; i++) {
-        current_cluster = FAT_GetNextCluster(instance, current_cluster);
-    }
+        // Рассчитываем физический номер сектора на диске
+        uint32_t TargetSector = FAT_Struct->Cluster2_StartSector + 
+                                ((CurrentCluster - 2) * FAT_Struct->SectorsPerCluster) + 
+                                SectorInCluster;
 
-    static uint8_t __attribute__((aligned(4))) current_sector_buffer[512];
+        // Читаем сектор с диска в ваш глобальный буфер lba_buffer
+        FAT_Struct->DiskRead(TargetSector, lba_buffer);
 
-    // ГЛАВНЫЙ ЦИКЛ ЗАПИСИ
-    while (total_bytes_written < bytes_to_write) {
-        uint32_t offset_in_cluster = current_pos % cluster_size_bytes;
-        
-        // Вычисляем адрес текущего кластера на чипе W25Q
-        uint32_t cluster_phys_addr = instance->flash_map.data_addr + ((current_cluster - 2) * cluster_size_bytes);
-        
-        // Читаем кластер, модифицируем и пишем обратно (наша стандартная схема)
-        instance->disk_read(current_sector_buffer, cluster_phys_addr, cluster_size_bytes);
-        
-        uint32_t bytes_available_in_cluster = cluster_size_bytes - offset_in_cluster;
-        uint32_t bytes_needed = bytes_to_write - total_bytes_written;
-        uint32_t chunk_to_write = (bytes_needed < bytes_available_in_cluster) ? bytes_needed : bytes_available_in_cluster;
-        
-        for (uint32_t i = 0; i < chunk_to_write; i++) {
-            current_sector_buffer[offset_in_cluster + i] = in_buffer[total_bytes_written + i];
+        // Определяем, сколько байт доступно для копирования из текущего сектора
+        uint32_t BytesAvailableInSector = FAT_Struct->BytesPerSector - ByteOffsetInSector;
+        uint32_t BytesToCopy = Length - BytesRead;
+
+        if (BytesToCopy > BytesAvailableInSector) {
+            BytesToCopy = BytesAvailableInSector;
         }
-        
-        instance->disk_write(current_sector_buffer, cluster_phys_addr, cluster_size_bytes);
-        
-        total_bytes_written += chunk_to_write;
-        current_pos += chunk_to_write;
-        
-        // ЕСЛИ КЛАСТЕР ЗАКОНЧИЛСЯ, А ДАННЫЕ ЕЩЕ ЕСТЬ
-        if (total_bytes_written < bytes_to_write) {
-            uint32_t next_cluster = FAT_GetNextCluster(instance, current_cluster);
-            
-            // Если уперлись в маркер конца файла (>= 0x0FF8), пора выделять НОВЫЙ кластер!
-            if (next_cluster >= 0x0FF8) {
-                uint32_t free_cluster = FAT_FindFreeCluster(instance);
-                if (free_cluster == 0) {
-                    break; // Ошибка: флешка физически переполнена!
+
+        // Побайтово копируем данные из глобального lba_buffer напрямую в ваш OutBuffer
+        for (uint32_t i = 0; i < BytesToCopy; i++) {
+            OutBuffer[BytesRead + i] = lba_buffer[ByteOffsetInSector + i];
+        }
+
+        // Обновляем счетчики прочитанного объема
+        BytesRead += BytesToCopy;
+        ByteOffsetInCluster += BytesToCopy;
+
+        // 4. ПЕРЕХОД НА СЛЕДУЮЩИЙ КЛАСТЕР
+        // Если позиция сравнялась с размером кластера — берем следующий из таблицы FAT
+        if (ByteOffsetInCluster >= BytesPerCluster) {
+            CurrentCluster = FAT_GetNextCluster(FAT_Struct, CurrentCluster);
+            ByteOffsetInCluster = 0; // В новом кластере чтение пойдет с 0-го байта
+
+            uint32_t EocMarker = (FAT_Struct->FAT_Type == FAT_TYPE_32) ? 0x0FFFFFF8 : 
+                                 (FAT_Struct->FAT_Type == FAT_TYPE_16) ? 0xFFF8 : 0x0FF8;
+
+            // Если цепочка кластеров прервалась
+            if (CurrentCluster >= EocMarker || CurrentCluster < 2) {
+                // Для файла это ошибка (размер не совпал с цепочкой), для папки — нормальный финал сырых данных
+                if (IsDirectory == false) {
+                    return false; 
+                } else {
+                    break; 
                 }
-                
-                // 1. Старому кластеру прописываем ссылку на этот новый свободный кластер
-                FAT_WriteClusterValue(instance, current_cluster, free_cluster);
-                
-                // 2. Новому кластеру ставим жесткий маркер конца файла
-                FAT_WriteClusterValue(instance, free_cluster, 0x0FFF);
-                
-                next_cluster = free_cluster;
             }
-            current_cluster = next_cluster;
         }
     }
 
-    // ОБНОВЛЯЕМ РАЗМЕР В ПАСПОРТЕ (как на прошлом шаге)
-    if (current_pos > instance->current_file_size) {
-        instance->current_file_size = current_pos;
-    }
+    // Фиксируем финальные маркеры положения в структуре
+    FAT_Struct->Directory.CurrentPosition = StartByte + BytesRead;
+    FAT_Struct->Directory.CurrentCluster  = CurrentCluster;
 
-    uint32_t entry_sector_addr = instance->current_file_entry_addr & ~(bytes_per_sec - 1);
-    uint32_t offset_in_sector = instance->current_file_entry_addr % bytes_per_sec;
-
-    instance->disk_read(current_sector_buffer, entry_sector_addr, bytes_per_sec);
-    current_sector_buffer[offset_in_sector + 28] = (uint8_t)(instance->current_file_size & 0xFF);
-    current_sector_buffer[offset_in_sector + 29] = (uint8_t)((instance->current_file_size >> 8) & 0xFF);
-    current_sector_buffer[offset_in_sector + 30] = (uint8_t)((instance->current_file_size >> 16) & 0xFF);
-    current_sector_buffer[offset_in_sector + 31] = (uint8_t)((instance->current_file_size >> 24) & 0xFF);
-    current_sector_buffer[offset_in_sector + 22] ^= 0xFF; 
-
-    instance->disk_write(current_sector_buffer, entry_sector_addr, bytes_per_sec);
-
-    return total_bytes_written;
+    return true; // Чтение завершено успешно!
 }
-*/
-

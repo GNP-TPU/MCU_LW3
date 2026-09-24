@@ -216,6 +216,35 @@ int main(void){
 
 					sprintf(test_msg, "[FAT] FAT Type: %s\r\n", SD_FAT.FAT_Type_String);
 					USART_SendString(USART1, test_msg);
+
+					if(sd_status == 0){
+						sd_status = FAT_OpenDirectory(&SD_FAT, "MyNewFolder");
+
+						sprintf(test_msg, "[FAT] Directory open status: %d\r\n", sd_status);
+						USART_SendString(USART1, test_msg);
+
+						if(sd_status){
+							sd_status = FAT_OpenFile(&SD_FAT, "Text_Document_In_Folder.txt");
+
+							sprintf(test_msg, "[FAT] File open status: %d\r\n", sd_status);
+							USART_SendString(USART1, test_msg);
+
+							if(sd_status){
+								
+
+								uint8_t file_buffer[SD_FAT.Directory.FileSize];
+								sd_status = FAT_ReadFile(&SD_FAT, file_buffer, 0, SD_FAT.Directory.FileSize);
+
+								sprintf(test_msg, "[FAT] File Read: %d\r\n", sd_status);
+								USART_SendString(USART1, test_msg);
+
+								sprintf(test_msg, "[FAT] File Data: %.*s\r\n", SD_FAT.Directory.FileSize, file_buffer);
+								USART_SendString(USART1, test_msg);
+							}
+							
+						}
+						
+					}
 				}
 				else{
 					sprintf(test_msg, "[SD Init] 4 bit bus disabled");
@@ -237,10 +266,10 @@ int main(void){
 		USART_SendString(USART1, test_msg);
 	}
 
-	// USB_Core_Init();
+	USB_Core_Init();
 	
 	while(1){
-		// USB_MSC_Background_Process();
+		USB_MSC_Background_Process();
 		
 		if(data_available){
 			if(uart_cmd[0] == 0){
