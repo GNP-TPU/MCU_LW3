@@ -217,7 +217,74 @@ int main(void){
 					sprintf(test_msg, "[FAT] FAT Type: %s\r\n", SD_FAT.FAT_Type_String);
 					USART_SendString(USART1, test_msg);
 
-					if(sd_status == 0){
+
+					if(sd_status){
+
+						sd_status = FAT_OpenFile(&SD_FAT, "My_BMP_File.bmp");
+
+						sprintf(test_msg, "[FAT] File open status: %d\r\n", sd_status);
+						USART_SendString(USART1, test_msg);
+
+						if(sd_status){
+							uint8_t file_buffer[54];
+							sd_status = FAT_ReadFile(&SD_FAT, file_buffer, 0, 54);
+
+							sprintf(test_msg, "[FAT] File Read: %d\r\n", sd_status);
+							USART_SendString(USART1, test_msg);
+
+							if(sd_status){
+								BMP_Header_t bmp;
+								memcpy(&bmp, file_buffer, sizeof(BMP_Header_t));
+
+								char log_buf[128]; 
+
+								USART_SendString(USART1, "\r\n========= BMP FILE HEADER =========\r\n");
+
+								// 1. Сигнатура (печатаем как символы, проверяем 'B' и 'M')
+								sprintf(log_buf, " Signature:    %c%c (0x%04X)\r\n", 
+										(char)(bmp.bfType & 0xFF), (char)(bmp.bfType >> 8), bmp.bfType);
+								USART_SendString(USART1, log_buf);
+
+								// 2. Размеры и смещения
+								sprintf(log_buf, " File Size:    %lu bytes\r\n", (unsigned long)bmp.bfSize);
+								USART_SendString(USART1, log_buf);
+
+								sprintf(log_buf, " Pixel Offset: %lu bytes\r\n", (unsigned long)bmp.bfOffBits);
+								USART_SendString(USART1, log_buf);
+
+								USART_SendString(USART1, "--------- BITMAPINFOHEADER ---------\r\n");
+
+								// 3. Геометрия изображения
+								sprintf(log_buf, " Header Size:  %lu bytes\r\n", (unsigned long)bmp.biSize);
+								USART_SendString(USART1, log_buf);
+
+								sprintf(log_buf, " Width:        %lu px\r\n", (unsigned long)bmp.biWidth);
+								USART_SendString(USART1, log_buf);
+
+								// Важно: кастуем к int32_t на случай отрицательной высоты (отсчет сверху вниз)
+								sprintf(log_buf, " Height:       %ld px %s\r\n", 
+										(long)(int32_t)bmp.biHeight, 
+										((int32_t)bmp.biHeight < 0) ? "(Top-Down)" : "(Bottom-Up)");
+								USART_SendString(USART1, log_buf);
+
+								// 4. Глубина цвета и сжатие
+								sprintf(log_buf, " Bit Count:    %u bpp (Bits Per Pixel)\r\n", bmp.biBitCount);
+								USART_SendString(USART1, log_buf);
+
+								sprintf(log_buf, " Compression:  %lu %s\r\n", 
+										(unsigned long)bmp.biCompression, 
+										(bmp.biCompression == 0) ? "(None / BI_RGB)" : "(Compressed!)");
+								USART_SendString(USART1, log_buf);
+
+								sprintf(log_buf, " Image Size:   %lu bytes (Pixel Data)\r\n", (unsigned long)bmp.biSizeImage);
+								USART_SendString(USART1, log_buf);
+
+								USART_SendString(USART1, "====================================\r\n");
+
+							}
+						}
+
+						/*
 						sd_status = FAT_OpenDirectory(&SD_FAT, "MyNewFolder");
 
 						sprintf(test_msg, "[FAT] Directory open status: %d\r\n", sd_status);
@@ -243,6 +310,7 @@ int main(void){
 							}
 							
 						}
+						*/
 						
 					}
 				}
@@ -296,27 +364,28 @@ int main(void){
 				USART_SendString(USART1, "\r\n--- SD DATA SECTOR 64 DUMP ---\r\n");
 				for (uint8_t row = 0; row < 16; row++) {
 								
-								// 1. Выводим текущее HEX-смещение (адрес строки) для красоты
-								sprintf(test_msg, "%04X: ", row * 32); // 16 строк по 32 байта
-								USART_SendString(USART1, test_msg);
+					// 1. Выводим текущее HEX-смещение (адрес строки) для красоты
+					sprintf(test_msg, "%04X: ", row * 32); // 16 строк по 32 байта
+					USART_SendString(USART1, test_msg);
 
-								// Внутренний цикл по 8 элементам uint32_t в текущей строке (8 * 4 = 32 байта)
-								for (uint8_t col = 0; col < 8; col++) {
+					// Внутренний цикл по 8 элементам uint32_t в текущей строке (8 * 4 = 32 байта)
+					for (uint8_t col = 0; col < 8; col++) {
 									
-									// Рассчитываем правильный линейный индекс от 0 до 127
-									uint32_t index = (row * 8) + col;
+						// Рассчитываем правильный линейный индекс от 0 до 127
+						uint32_t index = (row * 8) + col;
 
-									// Форматируем ПОЛНОЕ 32-битное слово (8 hex-символов с ведущими нулями)
-									// Добавляем пробел в конце для разделения колонок
-									sprintf(test_msg, "%08X ", Sector_Buffer[index]);
-									
-									// Отправляем ВСЮ сформированную строку, а не только первый символ!
-									USART_SendString(USART1, test_msg);
-								}
+						// Форматируем ПОЛНОЕ 32-битное слово (8 hex-символов с ведущими нулями)
+						// Добавляем пробел в конце для разделения колонок
+						sprintf(test_msg, "%08X ", Sector_Buffer[index]);
+										
+						// Отправляем ВСЮ сформированную строку, а не только первый символ!
+						USART_SendString(USART1, test_msg);
+					}
 
-								// В конце каждой строки делаем перенос каретки (\r\n)
-								USART_SendString(USART1, "\r\n");
-							}
+					// В конце каждой строки делаем перенос каретки (\r\n)
+					USART_SendString(USART1, "\r\n");
+				}
+
 				USART_SendString(USART1, "\r\n--- SD DATA SECTOR 64 DUMP ---\r\n");
 
 				uart_cmd[0] = 12;

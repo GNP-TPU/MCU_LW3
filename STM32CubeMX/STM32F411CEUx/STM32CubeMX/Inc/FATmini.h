@@ -113,7 +113,7 @@ typedef struct {
 
 typedef struct __attribute__((packed)) {
     /* --- Заголовок файла (BITMAPFILEHEADER — 14 байт) --- */
-    uint16_t bfType;           // [0-1]   Сигнатура 'BM' (в Little-Endian это 0x4D42)
+    uint16_t bfType;           // [0-1]   Сигнатура 'BM' (0x424D)
     uint32_t bfSize;           // [2-5]   Полный размер всего BMP-файла в байтах
     uint16_t bfReserved1;      // [6-7]   Зарезервировано (всегда 0)
     uint16_t bfReserved2;      // [8-9]   Зарезервировано (всегда 0)
@@ -122,7 +122,7 @@ typedef struct __attribute__((packed)) {
     /* --- Заголовок изображения (BITMAPINFOHEADER — 40 байт) --- */
     uint32_t biSize;           // [14-17] Размер этого подзаголовка (всегда 40)
     uint32_t biWidth;          // [18-21] ШИРИНА ИЗОБРАЖЕНИЯ в пикселях (Width)
-    uint32_t biHeight;         // [22-25] ВЫСОТА ИЗОБРАЖЕНИЯ в пикселях (Height)
+    int32_t  biHeight;         // [22-25] ВЫСОТА ИЗОБРАЖЕНИЯ в пикселях (Height)
     uint16_t biPlanes;         // [26-27] Количество плоскостей (всегда 1)
     uint16_t biBitCount;       // [28-29] ГЛУБИНА ЦВЕТА (у вашей картинки там будет 24 бита)
     uint32_t biCompression;    // [30-33] Тип сжатия (0 — без сжатия, BI_RGB)
@@ -133,7 +133,10 @@ typedef struct __attribute__((packed)) {
     uint32_t biClrImportant;   // [50-53] Количество «важных» цветов (0 — все важные)
 } BMP_Header_t;
 
-uint8_t     FAT_Mount(FATmini_t* instance);
+
+
+bool        FAT_Mount(FATmini_t* instance);
+
 bool        FAT_OpenFile(FATmini_t* FAT_Struct, char* FileName);
 bool        FAT_OpenDirectory(FATmini_t* FAT_Struct, char* DirName);
 void        FAT_ReturnRootDirectory(FATmini_t* FAT_Struct);
