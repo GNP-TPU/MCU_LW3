@@ -30,34 +30,17 @@
 #define SD_CARD_V2_HC   3  // Карты High Capacity / Extended Capacity (от 4ГБ до 2ТБ)
 
 typedef struct{
-
-} SD_OCR_t;
-
-typedef struct{
-    
-} SD_CID_t;
-
-/*
-typedef struct{
-    CardType;
-    CardVersion;
-    Class;
-    
-} SD_CSD_t;
-*/
-
-typedef struct{
     uint32_t Card_CID[4];
     uint16_t Card_RCA;
 
-    uint8_t  CardType;       // 1) Тип карты: 0 - SDSC, 1 - SDHC/SDXC
-    uint8_t  CardVersion;    // 2) Версия: 0 - Ver 1.X, 1 - Ver 2.0+
-    uint8_t  Class;          // 3) Класс скорости (из SSR, ACMD13)
-    uint32_t BlockNbr;       // 5) Емкость карты в физических блоках
-    uint32_t BlockSize;      // 6) Емкость физического блока в байтах
-    uint32_t LogBlockNbr;    // 7) Логическая емкость в блоках
-    uint32_t LogBlockSize;   // 8) Логическая емкость блока в байтах
-    uint32_t CardSpeed;      // 9) Скорость обмена данными в МГц
+    uint8_t  CardType;       // Тип карты: 0 - SDSC, 1 - SDHC/SDXC
+    uint8_t  CardVersion;    // Версия: 0 - Ver 1.X, 1 - Ver 2.0+
+    uint8_t  Class;          // Класс скорости (из SSR, ACMD13)
+    uint32_t BlockNbr;       // Емкость карты в физических блоках
+    uint32_t BlockSize;      // Емкость физического блока в байтах
+    uint32_t LogBlockNbr;    // Логическая емкость в блоках
+    uint32_t LogBlockSize;   // Логическая емкость блока в байтах
+    uint32_t CardSpeed;      // Скорость обмена данными в МГц
 } SD_Card_t;
 
 void        SDIO_Init(void);

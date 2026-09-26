@@ -234,8 +234,6 @@ int main(void){
 			USART_SendString(USART1, test_msg);
 
 
-			sd_status = 0;
-
 			if(sd_status){
 				uint8_t file_buffer[54];
 				sd_status = FAT_ReadFile(&SD_FAT, file_buffer, 0, 54);
@@ -304,60 +302,6 @@ int main(void){
 	
 	while(1){
 		USB_MSC_Background_Process();
-		
-		if(data_available){
-			if(uart_cmd[0] == 0){
-				read_status = SDIO_ReadBlock_DMA(&My_SD_Card, 0, Sector_Buffer);
-						
-				sprintf(test_msg, "[SD Read] Status: 0x%02X\r\n", read_status);
-				USART_SendString(USART1, test_msg);
-
-				uart_cmd[0] = 12;
-			}
-			if(uart_cmd[0] == 1){
-				uint16_t sector_pointer = (uint16_t)(uart_cmd[1] << 8 | uart_cmd[2]);
-				uint32_t cmd = (uint32_t)uart_cmd[3];
-				Sector_Buffer[sector_pointer] = cmd; 
-				write_status = SDIO_WriteBlock_DMA(&My_SD_Card, 0, Sector_Buffer);
-				sprintf(test_msg, "[SD Write] Status: 0x%02X\r\n", write_status);
-				USART_SendString(USART1, test_msg);
-
-				sprintf(test_msg, "[SD Write] Pointer: 0x%04X Data: 0x%08X\r\n", sector_pointer, cmd);
-				USART_SendString(USART1, test_msg);
-				uart_cmd[0] = 12;
-			}
-			if(uart_cmd[0] == 2){
-				USART_SendString(USART1, "\r\n--- SD DATA SECTOR 64 DUMP ---\r\n");
-				for (uint8_t row = 0; row < 16; row++) {
-								
-					// 1. Выводим текущее HEX-смещение (адрес строки) для красоты
-					sprintf(test_msg, "%04X: ", row * 32); // 16 строк по 32 байта
-					USART_SendString(USART1, test_msg);
-
-					// Внутренний цикл по 8 элементам uint32_t в текущей строке (8 * 4 = 32 байта)
-					for (uint8_t col = 0; col < 8; col++) {
-									
-						// Рассчитываем правильный линейный индекс от 0 до 127
-						uint32_t index = (row * 8) + col;
-
-						// Форматируем ПОЛНОЕ 32-битное слово (8 hex-символов с ведущими нулями)
-						// Добавляем пробел в конце для разделения колонок
-						sprintf(test_msg, "%08X ", Sector_Buffer[index]);
-										
-						// Отправляем ВСЮ сформированную строку, а не только первый символ!
-						USART_SendString(USART1, test_msg);
-					}
-
-					// В конце каждой строки делаем перенос каретки (\r\n)
-					USART_SendString(USART1, "\r\n");
-				}
-
-				USART_SendString(USART1, "\r\n--- SD DATA SECTOR 64 DUMP ---\r\n");
-
-				uart_cmd[0] = 12;
-			}
-			data_available = 0;
-		}
 	}
 
 }

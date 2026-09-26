@@ -33,11 +33,6 @@ void MSC_Send_CSW(uint8_t status) {
     // Отправляем CSW через EP1 IN
     USB_EP_Tx(1, (uint8_t*)&csw, 13);
 }
-
-
-
-// Массив в ОЗУ с выравниванием по 4 байтам для быстрой работы FIFO
-__ALIGN4 static uint8_t msc_ram_disk[STORAGE_SECTOR_NBR];
 //==========================================================================
 __ALIGN4 const uint8_t USB_DeviceDescriptor[] = {
     0x12,                       // 0 bLength (Размер дескриптора)
