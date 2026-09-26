@@ -10,6 +10,8 @@ USART_InitTypeDef				USART_PC;
 SPI_InitTypeDef 				SPI_W25Q;
 SPI_InitTypeDef 				SPI_ST7735;
 
+SD_Card_t 						My_SD_Card;
+
 char USART_OutBuf[2048];
 //====================================================================================================
 void __FLASH_SPI_Select(bool select){
@@ -53,7 +55,7 @@ void USB_MSC_Background_Process(void) {
 
         // ВЫЗЫВАЕМ ЧТЕНИЕ ЧЕРЕЗ DMA!
         // Передаем адрес сектора и указатель на USB буфер
-        uint8_t sd_status = SDIO_ReadBlock_DMA(msc_requested_lba, (uint32_t*)msc_sector_buffer);
+        uint8_t sd_status = SDIO_ReadBlock_DMA(&My_SD_Card, msc_requested_lba, (uint32_t*)msc_sector_buffer);
         
         if (sd_status != 0) {
             // Ошибка чтения — глушим буфер нулями
@@ -71,7 +73,7 @@ void USB_MSC_Background_Process(void) {
 	// Логика записи
     if (msc_write_request) {
         // Находим физический адрес начала 4 КБ сектора флешки (округляем вниз до 4096)
-		volatile uint8_t write_status = SDIO_WriteBlock_DMA(msc_write_lba, (uint32_t*)msc_sector_buffer);
+		volatile uint8_t write_status = SDIO_WriteBlock_DMA(&My_SD_Card, msc_write_lba, (uint32_t*)msc_sector_buffer);
 
         // Сбрасываем флаг запроса на запись текущего сектора
         msc_write_request = 0;
@@ -124,23 +126,22 @@ ST77xx_t MyDisplay = {
 	.ST77xx_SPI_Write 	= __ST7735_SPI_Write,
 };
 //====================================================================================================
-
 FATmini_t SD_FAT;
 
 void SD_Read_For_FAT(uint32_t sector_address, uint8_t* buffer) {
     // Вызываем вашу реальную функцию чтения низкого уровня
-    SDIO_ReadBlock_DMA(sector_address, (uint32_t*)buffer);
+    SDIO_ReadBlock_DMA(&My_SD_Card, sector_address, (uint32_t*)buffer);
 }
 
 void SD_Write_For_FAT(uint32_t sector_address, uint8_t* buffer) {
-	SDIO_WriteBlock_DMA(sector_address, (uint32_t*)buffer);
+	SDIO_WriteBlock_DMA(&My_SD_Card, sector_address, (uint32_t*)buffer);
 }
 
 BMP_Header_t bmp_info;
 uint8_t row_buffer[300];
 
-extern volatile uint16_t Card_RCA;          // Глобальная переменная для хранения адреса карты
-extern volatile uint32_t Card_CID[4]; 
+extern volatile uint32_t Card_CSD[4]; 
+
 
 __attribute__((aligned(4))) uint32_t Sector_Buffer[128] = {0};
 volatile uint8_t read_status = 0xFF;
@@ -159,174 +160,122 @@ int main(void){
 
 	SDIO_Init();
 
+	SD_FAT.DiskRead 	= SD_Read_For_FAT;
+	SD_FAT.DiskWrite 	= SD_Write_For_FAT;
+
 	char test_msg[128];
 
 	USART_SendString(USART1, "\r\n");
-	uint8_t sd_status = SD_Init_Card();
+	uint8_t sd_status = SD_Init_Card(&My_SD_Card);
 
 	sprintf(test_msg, "[SD Init] Init Status: 0x%02X\r\n", sd_status);
 	USART_SendString(USART1, test_msg);
 
-	if(sd_status == 0){
-		sd_status = SD_Get_Card_Address();
+	if(sd_status == SD_CMD_OK){
 
-		sprintf(test_msg, "[SD Init] Get Card Status: 0x%02X\r\n", sd_status);
+		sprintf(test_msg, "[SD Init] RCA: 0x%04X\r\n", My_SD_Card.Card_RCA);
 		USART_SendString(USART1, test_msg);
 
-		sprintf(test_msg, "[SD Init] RCA: 0x%04X\r\n", Card_RCA);
+		sprintf(test_msg, "[SD Init] CID: 0x%08X %08X %08X %08X\r\n", My_SD_Card.Card_CID[0], 
+			My_SD_Card.Card_CID[1], My_SD_Card.Card_CID[2], My_SD_Card.Card_CID[3]);
 		USART_SendString(USART1, test_msg);
 
-		sprintf(test_msg, "[SD Init] CID: 0x%04X%04X%04X%04X\r\n", Card_CID[0], Card_CID[1], Card_CID[2], Card_CID[3]);
+		sprintf(test_msg, "[SD Init] CSD: 0x%08X %08X %08X %08X\r\n", Card_CSD[0], Card_CSD[1], Card_CSD[2], Card_CSD[3]);
 		USART_SendString(USART1, test_msg);
 
-		if(sd_status == 0){
-			sd_status = SD_Select_Card();
-			
-			sprintf(test_msg, "[SD Init] Select Card Status: 0x%02X\r\n", sd_status);
+					
+
+		sd_status = FAT_Mount(&SD_FAT);
+
+		sprintf(test_msg, "[FAT] Mount status: 0x%02X\r\n", sd_status);
+		USART_SendString(USART1, test_msg);
+
+		sprintf(test_msg, "[FAT] Sign: 0x%04X\r\n", SD_FAT.Sign);
+		USART_SendString(USART1, test_msg);
+
+		sprintf(test_msg, "[FAT] Bytes per Sector: %u\r\n", SD_FAT.BytesPerSector);
+		USART_SendString(USART1, test_msg);
+
+		sprintf(test_msg, "[FAT] Sectors per Cluster: %u\r\n", SD_FAT.SectorsPerCluster);
+		USART_SendString(USART1, test_msg);
+
+		sprintf(test_msg, "[FAT] Count Of Clusters: %u\r\n", SD_FAT.CountOfClusters);
+		USART_SendString(USART1, test_msg);
+
+		sprintf(test_msg, "[FAT] FAT Type: %s\r\n", SD_FAT.FAT_Type_String);
+		USART_SendString(USART1, test_msg);
+
+
+		if(sd_status){
+
+			sd_status = FAT_OpenFile(&SD_FAT, "My_BMP_File.bmp");
+
+			sprintf(test_msg, "[FAT] File open status: %d\r\n", sd_status);
 			USART_SendString(USART1, test_msg);
 
-			if(sd_status == 0){
-				sd_status = SD_Enable_4Bit_Bus();
-
-				sprintf(test_msg, "[SD Init] Enable 4 bit bus Status: 0x%02X\r\n", sd_status);
-				USART_SendString(USART1, test_msg);
-
-				if(sd_status == 0){
-					SDIO_Switch_To_High_Speed();
-
-					SD_FAT.DiskRead = SD_Read_For_FAT;
-					SD_FAT.DiskWrite = SD_Write_For_FAT;
-
-					sd_status = FAT_Mount(&SD_FAT);
-
-					sprintf(test_msg, "[FAT] Mount status: 0x%02X\r\n", sd_status);
-					USART_SendString(USART1, test_msg);
-
-					sprintf(test_msg, "[FAT] Sign: 0x%04X\r\n", SD_FAT.Sign);
-					USART_SendString(USART1, test_msg);
-
-					sprintf(test_msg, "[FAT] Bytes per Sector: %u\r\n", SD_FAT.BytesPerSector);
-					USART_SendString(USART1, test_msg);
-
-					sprintf(test_msg, "[FAT] Sectors per Cluster: %u\r\n", SD_FAT.SectorsPerCluster);
-					USART_SendString(USART1, test_msg);
-
-					sprintf(test_msg, "[FAT] Count Of Clusters: %u\r\n", SD_FAT.CountOfClusters);
-					USART_SendString(USART1, test_msg);
-
-					sprintf(test_msg, "[FAT] FAT Type: %s\r\n", SD_FAT.FAT_Type_String);
-					USART_SendString(USART1, test_msg);
-
-
-					if(sd_status){
-
-						sd_status = FAT_OpenFile(&SD_FAT, "My_BMP_File.bmp");
-
-						sprintf(test_msg, "[FAT] File open status: %d\r\n", sd_status);
-						USART_SendString(USART1, test_msg);
-
-						if(sd_status){
-							uint8_t file_buffer[54];
-							sd_status = FAT_ReadFile(&SD_FAT, file_buffer, 0, 54);
-
-							sprintf(test_msg, "[FAT] File Read: %d\r\n", sd_status);
-							USART_SendString(USART1, test_msg);
-
-							if(sd_status){
-								BMP_Header_t bmp;
-								memcpy(&bmp, file_buffer, sizeof(BMP_Header_t));
-
-								char log_buf[128]; 
-
-								USART_SendString(USART1, "\r\n========= BMP FILE HEADER =========\r\n");
-
-								// 1. Сигнатура (печатаем как символы, проверяем 'B' и 'M')
-								sprintf(log_buf, " Signature:    %c%c (0x%04X)\r\n", 
-										(char)(bmp.bfType & 0xFF), (char)(bmp.bfType >> 8), bmp.bfType);
-								USART_SendString(USART1, log_buf);
-
-								// 2. Размеры и смещения
-								sprintf(log_buf, " File Size:    %lu bytes\r\n", (unsigned long)bmp.bfSize);
-								USART_SendString(USART1, log_buf);
-
-								sprintf(log_buf, " Pixel Offset: %lu bytes\r\n", (unsigned long)bmp.bfOffBits);
-								USART_SendString(USART1, log_buf);
-
-								USART_SendString(USART1, "--------- BITMAPINFOHEADER ---------\r\n");
-
-								// 3. Геометрия изображения
-								sprintf(log_buf, " Header Size:  %lu bytes\r\n", (unsigned long)bmp.biSize);
-								USART_SendString(USART1, log_buf);
-
-								sprintf(log_buf, " Width:        %lu px\r\n", (unsigned long)bmp.biWidth);
-								USART_SendString(USART1, log_buf);
-
-								// Важно: кастуем к int32_t на случай отрицательной высоты (отсчет сверху вниз)
-								sprintf(log_buf, " Height:       %ld px %s\r\n", 
-										(long)(int32_t)bmp.biHeight, 
-										((int32_t)bmp.biHeight < 0) ? "(Top-Down)" : "(Bottom-Up)");
-								USART_SendString(USART1, log_buf);
-
-								// 4. Глубина цвета и сжатие
-								sprintf(log_buf, " Bit Count:    %u bpp (Bits Per Pixel)\r\n", bmp.biBitCount);
-								USART_SendString(USART1, log_buf);
-
-								sprintf(log_buf, " Compression:  %lu %s\r\n", 
-										(unsigned long)bmp.biCompression, 
-										(bmp.biCompression == 0) ? "(None / BI_RGB)" : "(Compressed!)");
-								USART_SendString(USART1, log_buf);
-
-								sprintf(log_buf, " Image Size:   %lu bytes (Pixel Data)\r\n", (unsigned long)bmp.biSizeImage);
-								USART_SendString(USART1, log_buf);
-
-								USART_SendString(USART1, "====================================\r\n");
-
-							}
-						}
-
-						/*
-						sd_status = FAT_OpenDirectory(&SD_FAT, "MyNewFolder");
-
-						sprintf(test_msg, "[FAT] Directory open status: %d\r\n", sd_status);
-						USART_SendString(USART1, test_msg);
-
-						if(sd_status){
-							sd_status = FAT_OpenFile(&SD_FAT, "Text_Document_In_Folder.txt");
-
-							sprintf(test_msg, "[FAT] File open status: %d\r\n", sd_status);
-							USART_SendString(USART1, test_msg);
-
-							if(sd_status){
-								
-
-								uint8_t file_buffer[SD_FAT.Directory.FileSize];
-								sd_status = FAT_ReadFile(&SD_FAT, file_buffer, 0, SD_FAT.Directory.FileSize);
-
-								sprintf(test_msg, "[FAT] File Read: %d\r\n", sd_status);
-								USART_SendString(USART1, test_msg);
-
-								sprintf(test_msg, "[FAT] File Data: %.*s\r\n", SD_FAT.Directory.FileSize, file_buffer);
-								USART_SendString(USART1, test_msg);
-							}
-							
-						}
-						*/
-						
-					}
-				}
-				else{
-					sprintf(test_msg, "[SD Init] 4 bit bus disabled");
-					USART_SendString(USART1, test_msg);
-				}
-			}
-			else{
-				sprintf(test_msg, "[SD Init] Card selection failed!");
-				USART_SendString(USART1, test_msg);
-			}
-		}
-		else{
-			sprintf(test_msg, "[SD Init] Couldn't RCA nor CID addresses!");
+			sprintf(test_msg, "[FAT] FAT Table start sector: %d\r\n", SD_FAT.RootDirectory_StartSector);
 			USART_SendString(USART1, test_msg);
+
+
+			sd_status = 0;
+
+			if(sd_status){
+				uint8_t file_buffer[54];
+				sd_status = FAT_ReadFile(&SD_FAT, file_buffer, 0, 54);
+
+				sprintf(test_msg, "[FAT] File Read: %d\r\n", sd_status);
+				USART_SendString(USART1, test_msg);
+
+				if(sd_status){
+					BMP_Header_t bmp;
+					memcpy(&bmp, file_buffer, sizeof(BMP_Header_t));
+
+					char log_buf[128]; 
+
+					USART_SendString(USART1, "\r\n========= BMP FILE HEADER =========\r\n");
+
+					// 1. Сигнатура (печатаем как символы, проверяем 'B' и 'M')
+					sprintf(log_buf, " Signature:    %c%c (0x%04X)\r\n", 
+								(char)(bmp.bfType & 0xFF), (char)(bmp.bfType >> 8), bmp.bfType);
+					USART_SendString(USART1, log_buf);
+
+					// 2. Размеры и смещения
+					sprintf(log_buf, " File Size:    %lu bytes\r\n", (unsigned long)bmp.bfSize);
+					USART_SendString(USART1, log_buf);
+
+					sprintf(log_buf, " Pixel Offset: %lu bytes\r\n", (unsigned long)bmp.bfOffBits);
+					USART_SendString(USART1, log_buf);
+
+					USART_SendString(USART1, "--------- BITMAPINFOHEADER ---------\r\n");
+
+					// 3. Геометрия изображения
+					sprintf(log_buf, " Header Size:  %lu bytes\r\n", (unsigned long)bmp.biSize);
+					USART_SendString(USART1, log_buf);
+
+					sprintf(log_buf, " Width:        %lu px\r\n", (unsigned long)bmp.biWidth);
+					USART_SendString(USART1, log_buf);
+
+					// Важно: кастуем к int32_t на случай отрицательной высоты (отсчет сверху вниз)
+					sprintf(log_buf, " Height:       %ld px %s\r\n", 
+						(long)(int32_t)bmp.biHeight, 
+						((int32_t)bmp.biHeight < 0) ? "(Top-Down)" : "(Bottom-Up)");
+					USART_SendString(USART1, log_buf);
+
+					// 4. Глубина цвета и сжатие
+					sprintf(log_buf, " Bit Count:    %u bpp (Bits Per Pixel)\r\n", bmp.biBitCount);
+					USART_SendString(USART1, log_buf);
+
+					sprintf(log_buf, " Compression:  %lu %s\r\n", 
+						(unsigned long)bmp.biCompression, 
+						(bmp.biCompression == 0) ? "(None / BI_RGB)" : "(Compressed!)");
+					USART_SendString(USART1, log_buf);
+
+					sprintf(log_buf, " Image Size:   %lu bytes (Pixel Data)\r\n", (unsigned long)bmp.biSizeImage);
+					USART_SendString(USART1, log_buf);
+
+					USART_SendString(USART1, "====================================\r\n");
+				}
+			}
 		}
 	}
 	else{
@@ -341,7 +290,7 @@ int main(void){
 		
 		if(data_available){
 			if(uart_cmd[0] == 0){
-				read_status = SDIO_ReadBlock_DMA(0, Sector_Buffer);
+				read_status = SDIO_ReadBlock_DMA(&My_SD_Card, 0, Sector_Buffer);
 						
 				sprintf(test_msg, "[SD Read] Status: 0x%02X\r\n", read_status);
 				USART_SendString(USART1, test_msg);
@@ -352,7 +301,7 @@ int main(void){
 				uint16_t sector_pointer = (uint16_t)(uart_cmd[1] << 8 | uart_cmd[2]);
 				uint32_t cmd = (uint32_t)uart_cmd[3];
 				Sector_Buffer[sector_pointer] = cmd; 
-				write_status = SDIO_WriteBlock_DMA(0, Sector_Buffer);
+				write_status = SDIO_WriteBlock_DMA(&My_SD_Card, 0, Sector_Buffer);
 				sprintf(test_msg, "[SD Write] Status: 0x%02X\r\n", write_status);
 				USART_SendString(USART1, test_msg);
 

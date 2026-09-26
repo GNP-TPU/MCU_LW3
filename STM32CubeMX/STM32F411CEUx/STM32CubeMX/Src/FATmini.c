@@ -709,3 +709,96 @@ bool FAT_ReadFile(FATmini_t* FAT_Struct, uint8_t* OutBuffer, uint32_t StartByte,
 
     return true; 
 }
+
+bool FAT_WriteFile(FATmini_t* FAT_Struct, const uint8_t* InBuffer, uint32_t StartByte, uint32_t Length) {
+    if (FAT_Struct == 0 || InBuffer == 0 || Length == 0) {
+        return false;
+    }
+
+    // Файл или папка, атрибут из корневого каталога или из места, где прочитала о файле
+    bool IsDirectory = (FAT_Struct->Directory.Attr & 0x10) ? true : false;
+
+    // Проверка, что можно прочитать от начального байта и ограничение на длину чтения
+    if (IsDirectory == false) {
+        if (StartByte >= FAT_Struct->Directory.FileSize) {
+            return false;
+        }
+        if (StartByte + Length > FAT_Struct->Directory.FileSize) {
+            Length = FAT_Struct->Directory.FileSize - StartByte;
+        }
+    }
+
+    uint32_t BytesPerCluster = FAT_Struct->SectorsPerCluster * FAT_Struct->BytesPerSector;
+
+    uint32_t CurrentCluster = FAT_Struct->Directory.FirstCluster;
+    uint32_t ClustersToSkip = StartByte / BytesPerCluster; 
+
+    uint32_t ByteOffsetInCluster = StartByte % BytesPerCluster;
+
+    // Шагаем по таблице FAT до нужного кластера, где расположен StartByte
+    for (uint32_t i = 0; i < ClustersToSkip; i++) {
+        CurrentCluster = FAT_GetNextCluster(FAT_Struct, CurrentCluster);
+        
+        // Определяем маску конца цепочки (EOC) в зависимости от типа файловой системы
+        uint32_t EocMarker = (FAT_Struct->FAT_Type == FAT_TYPE_32) ? 0x0FFFFFF8 : 
+                             (FAT_Struct->FAT_Type == FAT_TYPE_16) ? 0xFFF8 : 0x0FF8;
+
+        if (CurrentCluster >= EocMarker || CurrentCluster < 2) {
+            return false; // StartByte указывает за пределы выделенной цепочки
+        }
+    }
+
+    // Счетчик байт
+    uint32_t BytesRead = 0;
+
+    // Пока не прочитаем сколько можно байт
+    while (BytesRead < Length) {
+        
+        uint32_t SectorInCluster = ByteOffsetInCluster / FAT_Struct->BytesPerSector;
+        uint32_t ByteOffsetInSector = ByteOffsetInCluster % FAT_Struct->BytesPerSector;
+        
+        uint32_t TargetSector = FAT_Struct->Cluster2_StartSector + 
+                                ((CurrentCluster - 2) * FAT_Struct->SectorsPerCluster) + 
+                                SectorInCluster;
+
+        FAT_Struct->DiskRead(TargetSector, lba_buffer);
+
+        uint32_t BytesAvailableInSector = FAT_Struct->BytesPerSector - ByteOffsetInSector;
+        uint32_t BytesToCopy = Length - BytesRead;
+
+        if (BytesToCopy > BytesAvailableInSector) {
+            BytesToCopy = BytesAvailableInSector;
+        }
+
+        for (uint32_t i = 0; i < BytesToCopy; i++) {
+            // InBuffer[BytesRead + i] = lba_buffer[ByteOffsetInSector + i];
+        }
+
+        BytesRead += BytesToCopy;
+        ByteOffsetInCluster += BytesToCopy;
+
+        // Идем к следующему кластеру
+        if (ByteOffsetInCluster >= BytesPerCluster) {
+            CurrentCluster = FAT_GetNextCluster(FAT_Struct, CurrentCluster);
+            ByteOffsetInCluster = 0; 
+
+            uint32_t EocMarker = (FAT_Struct->FAT_Type == FAT_TYPE_32) ? 0x0FFFFFF8 : 
+                                 (FAT_Struct->FAT_Type == FAT_TYPE_16) ? 0xFFF8 : 0x0FF8;
+
+            // Если цепочка кластеров прервалась
+            if (CurrentCluster >= EocMarker || CurrentCluster < 2) {
+                if (IsDirectory == false) {
+                    return false; 
+                } else {
+                    break; 
+                }
+            }
+        }
+    }
+
+    FAT_Struct->Directory.CurrentPosition = StartByte + BytesRead;  // Можно использовать для дальнешего чтения
+    FAT_Struct->Directory.CurrentCluster  = CurrentCluster;         // Чтобы от нуля не прыгать тоже можно использовать
+
+    return true; 
+}
+

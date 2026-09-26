@@ -241,109 +241,6 @@ void SDIO_Init(void){
     for (volatile int i = 0; i < 150000; i++); 
 }
 
-uint8_t SD_Init_Card(void) {
-    uint8_t status;
-
-    // 1. Посылаем CMD0 (Сброс). Ответ не нужен.
-    status = SDIO_SendCommand_Polling(0, 0x00000000, SDIO_RESP_NONE);
-    if (status != SD_CMD_OK) return 0x11;
-
-    for (volatile int i = 0; i < 150000; i++); // Пауза
-
-    // 2. Посылаем CMD8. Проверка паттерна 0xAA ОБЯЗАТЕЛЬНО идет с валидацией CRC (SDIO_RESP_SHORT)
-    status = SDIO_SendCommand_Polling(8, 0x000001AA, SDIO_RESP_SHORT);
-    if (status == SD_CMD_OK) {
-        if ((SD_Response_Data[0] & 0xFF) != 0xAA) return 0x22; // Сбой паттерна
-        Card_Type = SD_CARD_V2_SC; 
-    } else {
-        return 0x33; // Карты нет или критический сбой физики шины
-    }
-
-    // 3. Цикл опроса готовности памяти (CMD55 + ACMD41)
-    uint32_t acmd41_arg = 0x00FF8000 | (1UL << 30); // Маска питания + поддержка SDHC
-
-    volatile uint32_t retry = 500;
-    while (retry > 0) {
-        // И CMD55, и ACMD41 теперь шлем в режиме IGNORE_CRC!
-        status = SDIO_SendCommand_Polling(55, 0x00000000, SDIO_RESP_IGNORE_CRC);
-        if (status == SD_CMD_OK) {
-            status = SDIO_SendCommand_Polling(41, acmd41_arg, SDIO_RESP_IGNORE_CRC);
-            if (status == SD_CMD_OK) {
-                // Если карта ответила (Busy бит 31 равен 1) — значит она проснулась!
-                if (SD_Response_Data[0] & (1UL << 31)) {
-                    if (SD_Response_Data[0] & (1UL << 30)) Card_Type = SD_CARD_V2_HC;
-                    break; 
-                }
-            }
-        }
-        for (volatile int delay = 0; delay < 25000; delay++); // Честная пауза ~1-2 мс
-        retry--;
-    }
-
-    if (retry == 0) return 0x44; // Таймаут готовности внутренней памяти
-
-    return SD_CMD_OK; // УСПЕХ!
-}
-
-uint8_t SDIO_SendCommand(uint8_t cmd_index, uint32_t argument, uint8_t resp_type) {
-    // 1. СБРОС И ОЧИСТКА: Принудительно сбрасываем статус перед отправкой
-    SD_Command_Status = 0; 
-    
-    // Очищаем ВСЕ аппаратные флаги (включая старые таймауты и ошибки CRC)
-    SDIO->ICR = 0xFFFFFFFF;
-
-    // Ждем, пока автомат команд полностью освободится (биты не должны быть активны)
-    volatile uint32_t timeout = 0x000FFFFF; 
-    while (SDIO->STA & (SDIO_STA_CMDACT | SDIO_STA_TXACT | SDIO_STA_RXACT) && timeout) timeout--;
-
-    // 2. ЗАПИСЬ АРГУМЕНТА
-    SDIO->ARG = argument;
-
-    // 3. КОНФИГУРАЦИЯ КОМАНДЫ
-    uint32_t cmd_reg = (cmd_index & SDIO_CMD_CMDINDEX);
-
-    if (resp_type == SDIO_RESP_SHORT || resp_type == SDIO_RESP_IGNORE_CRC) {
-        cmd_reg |= SDIO_CMD_WAITRESP_0;  // Ожидать короткий ответ
-    } else if (resp_type == SDIO_RESP_LONG) {
-        cmd_reg |= (SDIO_CMD_WAITRESP_0 | SDIO_CMD_WAITRESP_1); // Ожидать длинный ответ
-    }
-
-    // Включаем автомат команд (CPSMEN) — физический старт передачи в шину
-    cmd_reg |= SDIO_CMD_CPSMEN;
-    
-    // КРИТИЧЕСКИЙ МОМЕНТ: Очищаем флаги ПРЯМО перед записью в регистр CMD
-    SDIO->ICR = 0xFFFFFFFF;
-    
-    SDIO->CMD = cmd_reg;
-
-    // 4. ОЖИДАНИЕ ПРЕРЫВАНИЯ С ЗАЩИТОЙ
-    timeout = 0x000FFFFF; 
-    while ((SD_Command_Status == 0) && (timeout > 0)) {
-        timeout--;
-    }
-
-    if (timeout == 0) {
-        // Если прерывание вообще не вызвано (проблема с NVIC или завис блок)
-        return SD_CMD_WAIT_ERR; 
-    }
-
-    // 5. РАЗБОР РЕЗУЛЬТАТА ИЗ ОБРАБОТЧИКА ПРЕРЫВАНИЯ
-    if (SD_Command_Status == 1) {
-        return SD_CMD_OK;        // Всё супер
-    } 
-    else if (SD_Command_Status == 2) {
-        return SD_CMD_TIMEOUT;   // Карта честно не ответила (без карты тут ДОЛЖЕН быть этот статус)
-    } 
-    else if (SD_Command_Status == 3) {
-        if (resp_type == SDIO_RESP_IGNORE_CRC) {
-            return SD_CMD_OK;    // Игнорируем аппаратный сбой CRC для ACMD41
-        }
-        return SD_CMD_CRC_FAIL;  // Ошибка CRC
-    }
-
-    return SD_CMD_WAIT_ERR;
-}
-
 uint8_t SDIO_SendCommand_Polling(uint8_t cmd_index, uint32_t argument, uint8_t resp_type) {
     volatile uint32_t timeout_cnt; 
     
@@ -419,50 +316,145 @@ uint8_t SDIO_SendCommand_Polling(uint8_t cmd_index, uint32_t argument, uint8_t r
     return SD_CMD_OK; 
 }
 
+uint8_t SD_Init_Card(SD_Card_t* SD_Struct) {
+    uint8_t status;
 
+    // 1. Посылаем CMD0 (Сброс). Ответ не нужен.
+    status = SDIO_SendCommand_Polling(0, 0x00000000, SDIO_RESP_NONE);
+    if (status != SD_CMD_OK) return 0x01;
 
-volatile uint16_t Card_RCA = 0;          // Глобальная переменная для хранения адреса карты
-volatile uint32_t Card_CID[4] = {0};     // Массив для хранения паспорта карты (при желании можно прочитать серийник)
+    for (volatile int i = 0; i < 150000; i++); // Пауза
 
-uint8_t SD_Get_Card_Address(void) {
+    // 2. Посылаем CMD8. Проверка паттерна 0xAA ОБЯЗАТЕЛЬНО идет с валидацией CRC (SDIO_RESP_SHORT)
+    status = SDIO_SendCommand_Polling(8, 0x000001AA, SDIO_RESP_SHORT);
+    if (status == SD_CMD_OK) {
+        if ((SD_Response_Data[0] & 0xFF) != 0xAA) return 0x02; // Сбой паттерна
+        Card_Type = SD_CARD_V2_SC; 
+    } else {
+        return 0x03; // Карты нет или критический сбой физики шины
+    }
+
+    // 3. Цикл опроса готовности памяти (CMD55 + ACMD41)
+    uint32_t acmd41_arg = 0x00FF8000 | (1UL << 30); // Маска питания + поддержка SDHC
+
+    volatile uint32_t retry = 500;
+    while (retry > 0) {
+        // И CMD55, и ACMD41 теперь шлем в режиме IGNORE_CRC!
+        status = SDIO_SendCommand_Polling(55, 0x00000000, SDIO_RESP_IGNORE_CRC);
+        if (status == SD_CMD_OK) {
+            status = SDIO_SendCommand_Polling(41, acmd41_arg, SDIO_RESP_IGNORE_CRC);
+            if (status == SD_CMD_OK) {
+                // Если карта ответила (Busy бит 31 равен 1) — значит она проснулась!
+                if (SD_Response_Data[0] & (1UL << 31)) {
+                    if (SD_Response_Data[0] & (1UL << 30)) Card_Type = SD_CARD_V2_HC;
+                    break; 
+                }
+            }
+        }
+        for (volatile int delay = 0; delay < 25000; delay++); // Честная пауза ~1-2 мс
+        retry--;
+    }
+
+    if (retry == 0) return 0x04; // Таймаут готовности внутренней памяти
+
+    status = SD_Get_Card_Address(SD_Struct);
+
+    if(status == SD_CMD_OK){
+        status = SD_Get_Card_CSD(SD_Struct);
+
+        if(status == SD_CMD_OK){
+            status = SD_Select_Card(SD_Struct);
+
+            if(status == SD_CMD_OK){
+                status = SD_Enable_4Bit_Bus(SD_Struct);
+
+                if(status == SD_CMD_OK){
+                    SDIO_Switch_To_High_Speed();
+
+                    return SD_CMD_OK; // УСПЕХ!
+                }
+                else{ return 0x08; }
+            }
+            else{ return 0x07; }
+        }
+        else{ return 0x06; }
+    }
+    else{ return 0x05; }
+
+    
+}
+
+uint8_t SD_Get_Card_Address(SD_Card_t* SD_Struct) {
     uint8_t status;
 
     // 1. Отправляем CMD2 (Запрос CID). Аргумент = 0. Ответ = LONG (R2)
     // Без этой команды карта не позволит запросить адрес.
     status = SDIO_SendCommand_Polling(2, 0x00000000, SDIO_RESP_LONG);
     if (status != SD_CMD_OK) {
-        return 0x55; // Ошибка: Карта не отдала CID регистр
+        return 0x09; // Ошибка: Карта не отдала CID регистр
     }
 
     // Сохраняем CID в наш глобальный буфер
-    Card_CID[0] = SD_Response_Data[0];
-    Card_CID[1] = SD_Response_Data[1];
-    Card_CID[2] = SD_Response_Data[2];
-    Card_CID[3] = SD_Response_Data[3];
+    SD_Struct->Card_CID[0] = SD_Response_Data[0];
+    SD_Struct->Card_CID[1] = SD_Response_Data[1];
+    SD_Struct->Card_CID[2] = SD_Response_Data[2];
+    SD_Struct->Card_CID[3] = SD_Response_Data[3];
 
     // 2. Отправляем CMD3 (Запрос RCA адреса). Аргумент = 0. Ответ = SHORT (R6)
     status = SDIO_SendCommand_Polling(3, 0x00000000, SDIO_RESP_SHORT);
     if (status != SD_CMD_OK) {
-        return 0x66; // Ошибка: Карта не прислала свой адрес RCA
+        return 0x0A; // Ошибка: Карта не прислала свой адрес RCA
     }
 
     // По спецификации SD, в ответе R6 на команду CMD3 карта присылает 
     // свой сгенерированный RCA адрес в СТАРШИХ 16 битах регистра RESP1 (биты 16-31).
-    Card_RCA = (SD_Response_Data[0] >> 16) & 0xFFFF;
+    SD_Struct->Card_RCA = (SD_Response_Data[0] >> 16) & 0xFFFF;
 
     // Проверяем, что адрес не равен 0 (0x0000 зарезервирован для широковещательных команд)
-    if (Card_RCA == 0) {
-        return 0x77; // Ошибка распределения адреса
+    if (SD_Struct->Card_RCA == 0) {
+        return 0x0B; // Ошибка распределения адреса
     }
 
     return SD_CMD_OK; // Успех! Адрес карты успешно получен.
 }
 
-uint8_t SD_Select_Card(void) {
+volatile uint32_t Card_CSD[4] = {0};
+
+uint8_t SD_Get_Card_CSD(SD_Card_t* SD_Struct) {
+    uint8_t status;
+
+    // Проверяем, что RCA адрес уже был получен (не равен 0)
+    if (SD_Struct->Card_RCA == 0) {
+        return 0x0C; // Ошибка: RCA адрес карты неизвестен, нельзя вызвать CMD9
+    }
+
+    // 1. Отправляем CMD9 (Запрос CSD). 
+    // Аргумент = RCA адрес в старших 16 битах (биты 16-31). 
+    // Ответ = LONG (R2), содержащий 128 бит данных регистра CSD.
+    uint32_t argument = (uint32_t)SD_Struct->Card_RCA << 16;
+    
+    status = SDIO_SendCommand_Polling(9, argument, SDIO_RESP_LONG);
+    if (status != SD_CMD_OK) {
+        return 0x0D; // Ошибка: Карта не отдала CSD регистр
+    }
+
+    // 2. Сохраняем CSD в глобальный буфер Card_CSD
+    // Контроллер SDIO раскладывает 128-битный ответ R2 в четыре 32-битных регистра
+    Card_CSD[0] = SD_Response_Data[0];
+    Card_CSD[1] = SD_Response_Data[1];
+    Card_CSD[2] = SD_Response_Data[2];
+    Card_CSD[3] = SD_Response_Data[3];
+
+    return SD_CMD_OK; // Успех! CSD успешно прочитан.
+}
+
+
+
+uint8_t SD_Select_Card(SD_Card_t* SD_Struct) {
     uint8_t status;
 
     // Аргумент: Card_RCA в старших 16 битах, младшие 16 бит равны 0
-    uint32_t argument = ((uint32_t)Card_RCA << 16);
+    uint32_t argument = ((uint32_t)SD_Struct->Card_RCA << 16);
 
     status = SDIO_SendCommand_Polling(7, argument, SDIO_RESP_SHORT);
     if (status != SD_CMD_OK) {
@@ -472,9 +464,9 @@ uint8_t SD_Select_Card(void) {
     return SD_CMD_OK;
 }
 
-uint8_t SD_Enable_4Bit_Bus(void) {
+uint8_t SD_Enable_4Bit_Bus(SD_Card_t* SD_Struct) {
     uint8_t status;
-    uint32_t rca_arg = ((uint32_t)Card_RCA << 16);
+    uint32_t rca_arg = ((uint32_t)SD_Struct->Card_RCA << 16);
 
     // 1. Сообщаем карте памяти о переходе (CMD55 + ACMD6)
     status = SDIO_SendCommand_Polling(55, rca_arg, SDIO_RESP_SHORT);
@@ -512,237 +504,6 @@ void SDIO_Switch_To_High_Speed(void) {
     for (volatile int i = 0; i < 950000; i++);
 
     
-}
-
-#define SD_DATA_OK              0
-#define SD_DATA_TIMEOUT         1
-#define SD_DATA_CRC_FAIL        2
-#define SD_DATA_FIFO_ERR        3
-
-/**
-  * @brief  Синхронное чтение одного сектора (512 байт) по его номеру (32 бита)
-  * @param  block_addr: Номер блока/сектора на карте (передаем 64)
-  * @param  buffer_out: Указатель на массив uint32_t размером не менее 128 элементов
-  * @return Статус выполнения
-  */
-uint8_t SDIO_ReadBlock_Polling(uint32_t block_addr, uint32_t *buffer_out) {
-    uint8_t status;
-    uint32_t words_read = 0;
-    
-    // -------------------------------------------------------------------------
-    // ШАГ 1: Полное обнуление автоматов и флагов данных перед стартом
-    // -------------------------------------------------------------------------
-    SDIO->DCTRL = 0;           // Выключаем автомат данных
-    SDIO->DLEN = 0;            // Сбрасываем длину
-    SDIO->DTIMER = 0;          // Сбрасываем таймер
-    SDIO->ICR = 0xFFFFFFFF;    // Очищаем абсолютно все старые флаги ошибок
-    
-    // Ждем, пока шина данных окончательно успокоится от прошлых транзакций
-    volatile uint32_t timeout_cnt = 0x000FFFFF; 
-    while ((SDIO->STA & (SDIO_STA_TXACT | SDIO_STA_RXACT)) && timeout_cnt) {
-        timeout_cnt--;
-    }
-
-    // -------------------------------------------------------------------------
-    // ШАГ 2: ОТПРАВЛЯЕМ КОМАНДУ ЧТЕНИЯ CMD17 КАК ОБЫЧНУЮ КОМАНДУ
-    // -------------------------------------------------------------------------
-    // Блок данных выключен — клинча на внутренних шинах не произойдет!
-    status = SDIO_SendCommand_Polling(17, block_addr, SDIO_RESP_SHORT);
-    if (status != SD_CMD_OK) {
-        return SD_DATA_TIMEOUT; // Если сама карта не ответила на команду
-    }
-    
-    // -------------------------------------------------------------------------
-    // ШАГ 3: КОМАНДА ЗАВЕРШЕНА УСПЕШНО! ВОТ ТЕПЕРЬ ВКЛЮЧАЕМ ДАННЫЕ
-    // -------------------------------------------------------------------------
-    SDIO->DLEN = 512;          // Задаем точный размер принимаемого блока
-    SDIO->DTIMER = 0x00FFFFFF; // Огромный таймаут для шины данных (~1-2 секунды)
-
-    // Принудительно чистим флаги еще раз прямо перед взводом дата-автомата
-    SDIO->ICR = 0xFFFFFFFF;
-
-    // Включаем аппаратный автомат данных на приём (Размер 512 байт, направление Карта -> Хост)
-    SDIO->DCTRL = (9 << SDIO_DCTRL_DBLOCKSIZE_Pos) | SDIO_DCTRL_DTDIR | SDIO_DCTRL_DTEN;
-
-    // -------------------------------------------------------------------------
-    // ШАГ 4: СИНХРОННАЯ ВЫЧИТКА ИЗ FIFO БУФЕРА НА ЛЕТУ (По флагу RXDAVL)
-    // -------------------------------------------------------------------------
-    // Крутимся строго до тех пор, пока не выгребем все 128 слов (512 байт)
-    while (words_read < 128) {
-        uint32_t sta_reg = SDIO->STA;
-
-        // Контролируем только критические ошибки CRC ячеек и жесткое переполнение FIFO.
-        // Проверку DTIMEOUT сюда не вставляем, чтобы ложный ранний бит не обрывал чтение!
-        if (sta_reg & SDIO_STA_DCRCFAIL) {
-            SDIO->ICR = SDIO_STA_DCRCFAIL;
-            SDIO->DCTRL = 0;
-            return SD_DATA_CRC_FAIL;
-        }
-        if (sta_reg & SDIO_STA_RXOVERR) {
-            SDIO->ICR = SDIO_STA_RXOVERR;
-            SDIO->DCTRL = 0;
-            return SD_DATA_FIFO_ERR; // Сработает, если процессор завис и вовремя не прочитал
-        }
-
-        // Если в FIFO появилось хотя бы одно слово — СРАЗУ забираем его.
-        // Это опустошает буфер в реальном времени и предотвращает переполнение FIFO!
-        if (sta_reg & SDIO_STA_RXDAVL) {
-            buffer_out[words_read++] = SDIO->FIFO;
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // ШАГ 5: ФИНАЛИЗАЦИЯ И ЗАКРЫТИЕ ТРАНЗАКЦИИ
-    // -------------------------------------------------------------------------
-    // Дожидаемся физического завершения блока данных на линиях шины (флаг DBCKEND)
-    while (!(SDIO->STA & (SDIO_STA_DBCKEND | SDIO_STA_DCRCFAIL)));
-    
-    // Сбрасываем финишные маркеры данных и таймаутов перед следующим сеансом
-    SDIO->ICR = 0xFFFFFFFF;
-    SDIO->DCTRL = 0; 
-
-    return SD_DATA_OK;
-}
-
-uint8_t SDIO_ReadBlock_Interrupt(uint32_t block_addr, uint32_t *buffer_out) {
-    uint8_t status;
-    
-    pSDIO_Read_Buffer = buffer_out;
-    SDIO_Words_To_Read = 128;        
-    SDIO_Transfer_Status = 0xFF;    
-    SDIO_Words_To_Write = 0; // Изолируем переменную записи на всякий случай
-
-    // 1. Глушим маску прерываний перед командой
-    SDIO->MASK = 0; 
-    SDIO->DCTRL = 0;           
-    SDIO->DLEN = 0;            
-    SDIO->DTIMER = 0;          
-    SDIO->ICR = 0xFFFFFFFF;    
-    
-    while (SDIO->STA & (SDIO_STA_TXACT | SDIO_STA_RXACT));
-
-    // 2. Отправляем CMD17 по Polling
-    status = SDIO_SendCommand_Polling(17, block_addr, SDIO_RESP_SHORT);
-    if (status != SD_CMD_OK) {
-        return 1; 
-    }
-    
-    // 3. Настраиваем параметры блока данных
-    SDIO->DLEN = 512;          
-    SDIO->DTIMER = 0x00FFFFFF; 
-    SDIO->ICR = 0xFFFFFFFF; 
-
-    // 4. Сначала включаем аппаратный автомат на ПРИЕМ (DTDIR = 1)
-    SDIO->DCTRL = (9 << SDIO_DCTRL_DBLOCKSIZE_Pos) | SDIO_DCTRL_DTDIR | SDIO_DCTRL_DTEN;
-
-    // 5. И только теперь открываем маску прерываний для ДАННЫХ
-    SDIO->MASK = SDIO_MASK_RXFIFOHFIE | SDIO_MASK_DBCKENDIE | 
-                 SDIO_MASK_DTIMEOUTIE | SDIO_MASK_DCRCFAILIE | SDIO_MASK_RXOVERRIE;
-
-    // 6. Честно ждем в основном потоке, пока фоновое прерывание вычитает все 128 слов
-    volatile uint32_t timeout_gate = 0x00FFFFFF;
-    while ((SDIO_Transfer_Status == 0xFF) && timeout_gate) {
-        timeout_gate--;
-    }
-
-    // 7. Если вылетели по софтовому таймауту — гасим всё вручную
-    if (timeout_gate == 0) {
-        SDIO->MASK = 0;  
-        SDIO->DCTRL = 0; 
-        return 1; 
-    }
-
-    // Очищаем абсолютно все аппаратные флаги статуса перед выходом,
-    // так как прерывание уже само выключило DCTRL и MASK при успешном DBCKEND
-    SDIO->ICR = 0xFFFFFFFF; 
-
-    return SDIO_Transfer_Status; 
-}
-
-uint8_t SDIO_WriteBlock_Interrupt(uint32_t block_addr, uint32_t *buffer_in) {
-    uint8_t status;
-    
-    // 1. Привязываем глобальные переменные
-    pSDIO_Write_Buffer = buffer_in;
-    SDIO_Words_To_Write = 128;       
-    SDIO_Transfer_Status = 0xFF;    
-    SDIO_Words_To_Read = 0; // Изолируем переменную чтения
-
-    // Тотально обнуляем маску и автоматы, чтобы прерывания гарантированно спали!
-    SDIO->MASK = 0; 
-    SDIO->DCTRL = 0;           
-    SDIO->DLEN = 0;            
-    SDIO->DTIMER = 0;          
-    SDIO->ICR = 0xFFFFFFFF;    
-    
-    while (SDIO->STA & (SDIO_STA_TXACT | SDIO_STA_RXACT));
-
-    // 2. Отправляем команду записи CMD24 по Polling
-    status = SDIO_SendCommand_Polling(24, block_addr, SDIO_RESP_SHORT);
-    if (status != SD_CMD_OK) {
-        return 1; // Карта отклонила запись
-    }
-    
-    // 3. Команда принята! Настраиваем параметры длины и таймаута
-    SDIO->DLEN = 512;          
-    SDIO->DTIMER = 0x00FFFFFF; 
-    SDIO->ICR = 0xFFFFFFFF; // Очищаем флаги перед стартом
-
-    // 4. СНАЧАЛА включаем аппаратный автомат данных на ПЕРЕДАЧУ (DTDIR = 0)
-    SDIO->DCTRL = (9 << SDIO_DCTRL_DBLOCKSIZE_Pos) | SDIO_DCTRL_DTEN;
-
-    // 5. И ТОЛЬКО ТЕПЕРЬ открываем шлюз прерываний!
-    // КРИТИЧЕСКИЙ МОМЕНТ: Исключаем DBCKENDIE отсюда. Включаем только прерывание по заполнению
-    // и аппаратные ошибки. DBCKENDIE включится сам внутри прерывания, когда Words_To_Write станет 0.
-    SDIO->MASK = SDIO_MASK_TXFIFOHEIE | SDIO_MASK_DTIMEOUTIE | 
-                 SDIO_MASK_DCRCFAILIE | SDIO_MASK_TXUNDERRIE;
-
-    // 6. Спокойно ждем фонового прерывания
-    volatile uint32_t timeout_gate = 0x00FFFFFF;
-    while ((SDIO_Transfer_Status == 0xFF) && timeout_gate) {
-        timeout_gate--;
-    }
-
-    if (timeout_gate == 0) {
-        SDIO->MASK = 0;  
-        SDIO->DCTRL = 0; 
-        return 1; // Вылет по таймауту софта
-    }
-
-    // 7. Ожидание окончания фазы Busy (пока карта физически шьет ячейки флеша)
-    // Если прерывание завершилось успехом (0), убеждаемся, что шина полностью освободилась.
-    if (SDIO_Transfer_Status == 0) {
-        timeout_gate = 0x00FFFFFF;
-        while ((SDIO->STA & SDIO_STA_TXACT) && timeout_gate) {
-            timeout_gate--;
-        }
-    }
-
-    SDIO->DCTRL = 0; // Полностью тушим автомат данных
-    SDIO->ICR = 0xFFFFFFFF; // Очищаем абсолютно все флаги перед выходом
-
-    return SDIO_Transfer_Status; 
-}
-
-
-
-uint8_t SDIO_Test_CMD17(uint32_t block_addr) {
-    uint8_t status;
-    
-    // Принудительно выключаем автомат данных, очищаем длины и таймеры.
-    // Нам нужно, чтобы шина данных "молчала", пока мы проверяем команду!
-    SDIO->DCTRL = 0;           
-    SDIO->DLEN = 0;            
-    SDIO->DTIMER = 0;          
-    SDIO->ICR = 0xFFFFFFFF;    
-    
-    // Ждем, пока автоматы полностью остановятся
-    while (SDIO->STA & (SDIO_STA_TXACT | SDIO_STA_RXACT | SDIO_STA_CMDACT));
-
-    // Отправляем CMD17 как изолированную изолированную команду
-    status = SDIO_SendCommand_Polling(17, block_addr, SDIO_RESP_SHORT);
-    
-    return status; 
 }
 
 void SDIO_DMA_Init(void) {
@@ -832,7 +593,7 @@ void SDIO_DMA_Config_TX(uint32_t *buffer_in) {
 
 
 
-uint8_t SDIO_ReadBlock_DMA(uint32_t block_addr, uint32_t *buffer_out) {
+uint8_t SDIO_ReadBlock_DMA(SD_Card_t* SD_Struct, uint32_t block_addr, uint32_t *buffer_out) {
     uint8_t status;
     
     SDIO->MASK = 0;   
@@ -880,7 +641,7 @@ uint8_t SDIO_ReadBlock_DMA(uint32_t block_addr, uint32_t *buffer_out) {
 
 
 
-uint8_t SDIO_WriteBlock_DMA(uint32_t block_addr, uint32_t *buffer_in) {
+uint8_t SDIO_WriteBlock_DMA(SD_Card_t* SD_Struct, uint32_t block_addr, uint32_t *buffer_in) {
     uint8_t status;
 
     __attribute__((aligned(4))) static volatile uint32_t local_aligned_buffer[128];
@@ -952,7 +713,7 @@ uint8_t SDIO_WriteBlock_DMA(uint32_t block_addr, uint32_t *buffer_in) {
 
     timeout_gate = 30000; // Ограничиваем разумным количеством попыток вместо 0x00FFFFFF
     while (timeout_gate--) {
-        status = SDIO_SendCommand_Polling(13, ((uint32_t)Card_RCA << 16), SDIO_RESP_SHORT);
+        status = SDIO_SendCommand_Polling(13, ((uint32_t)SD_Struct->Card_RCA << 16), SDIO_RESP_SHORT);
         
         if (status == SD_CMD_OK) {
             uint32_t response = SD_Response_Data[0];

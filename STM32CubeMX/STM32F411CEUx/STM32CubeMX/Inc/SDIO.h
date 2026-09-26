@@ -29,30 +29,54 @@
 #define SD_CARD_V2_SC   2  // Новые карты Standard Capacity
 #define SD_CARD_V2_HC   3  // Карты High Capacity / Extended Capacity (от 4ГБ до 2ТБ)
 
-void SDIO_Init(void);
+typedef struct{
 
-uint8_t SD_Init_Card(void);
-uint8_t SD_Get_Card_Address(void);
-uint8_t SD_Select_Card(void);
-uint8_t SD_Enable_4Bit_Bus(void);
+} SD_OCR_t;
 
-void SDIO_Switch_To_High_Speed(void);
-uint8_t SDIO_ReadBlock_Polling(uint32_t, uint32_t*);
-uint8_t SDIO_ReadBlock_Interrupt(uint32_t, uint32_t*);
+typedef struct{
+    
+} SD_CID_t;
 
-uint8_t SDIO_WriteBlock_Interrupt(uint32_t, uint32_t*);
+/*
+typedef struct{
+    CardType;
+    CardVersion;
+    Class;
+    
+} SD_CSD_t;
+*/
 
-uint8_t SDIO_SendCommand(uint8_t, uint32_t, uint8_t);
-uint8_t SDIO_SendCommand_Polling(uint8_t, uint32_t, uint8_t);
+typedef struct{
+    uint32_t Card_CID[4];
+    uint16_t Card_RCA;
+} SD_Card_t;
 
-void SDIO_DMA_Init(void);
+void        SDIO_Init(void);
+void        SDIO_DMA_Init(void);
+void        SDIO_Switch_To_High_Speed(void);
+uint8_t     SDIO_SendCommand_Polling(uint8_t, uint32_t, uint8_t);
 
-void SDIO_DMA_Config_RX(uint32_t *buffer_out);
+void        SDIO_DMA_Config_RX(uint32_t *buffer_out);
+uint8_t     SDIO_ReadBlock_DMA(SD_Card_t*, uint32_t block_addr, uint32_t *buffer_out);
 
-void SDIO_DMA_Config_TX(uint32_t *buffer_in);
+void        SDIO_DMA_Config_TX(uint32_t *buffer_in);
+uint8_t     SDIO_WriteBlock_DMA(SD_Card_t*, uint32_t block_addr, uint32_t *buffer_in);
 
-uint8_t SDIO_ReadBlock_DMA(uint32_t block_addr, uint32_t *buffer_out);
 
-uint8_t SDIO_WriteBlock_DMA(uint32_t block_addr, uint32_t *buffer_in);
+
+
+
+uint8_t     SD_Init_Card(SD_Card_t*);
+uint8_t     SD_Get_Card_Address(SD_Card_t* SD_Struct);
+uint8_t     SD_Get_Card_CSD(SD_Card_t* SD_Struct);
+uint8_t     SD_Select_Card(SD_Card_t* SD_Struct);
+uint8_t     SD_Enable_4Bit_Bus(SD_Card_t* SD_Struct);
+
+
+
+
+
+
+
 
 #endif
