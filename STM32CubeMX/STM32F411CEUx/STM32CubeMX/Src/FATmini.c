@@ -140,7 +140,7 @@ bool FAT_Mount(FATmini_t* FAT_Struct) {
 
     FAT_ReturnRootDirectory(FAT_Struct);
 
-    return true; // Success
+    return true;
 }
 
 uint32_t FAT_GetNextCluster(FATmini_t* FAT_Struct, uint32_t Current_Cluster) {
@@ -214,7 +214,7 @@ uint32_t FAT_GetNextCluster(FATmini_t* FAT_Struct, uint32_t Current_Cluster) {
                                ((uint32_t)lba_buffer[Local_Offset + 2] << 16) |
                                ((uint32_t)lba_buffer[Local_Offset + 3] << 24);
         
-        // В FAT32 старшие 4 бита зарезервированы, их необходимо маскировать
+        // В FAT32 старшие 4 бита зарезервированы
         return next_cluster & 0x0FFFFFFF;
     }
     
@@ -281,7 +281,7 @@ bool FAT_FindFile(FATmini_t* FAT_Struct, char* FileName) {
                         continue; // Уходим на следующий блок
                     }
 
-                    // Если это НЕ LFN, проверяем маску метки тома (Volume ID)
+                    // Если это не LFN, проверяем маску метки тома (Volume ID)
                     if (attr & 0x08) { lfn_is_valid = false; continue; } 
 
                     bool is_match = false;
@@ -470,7 +470,7 @@ bool FAT_FindFile(FATmini_t* FAT_Struct, char* FileName) {
                 }
             }
         }
-        else { // Мы зашли в ПОДПАПКУ в FAT12/16 (она обходится по кластерам)
+        else { // Мы зашли в подпапку в FAT12/16 (она обходится по кластерам)
             uint32_t eoc_marker = (FAT_Struct->FAT_Type == FAT_TYPE_16) ? 0xFFF8 : 0x0FF8;
             
             for (uint32_t CurrentCluster = FAT_Struct->Directory.CurrentCluster; 

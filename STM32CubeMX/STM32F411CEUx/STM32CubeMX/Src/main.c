@@ -147,8 +147,6 @@ __attribute__((aligned(4))) uint32_t Sector_Buffer[128] = {0};
 volatile uint8_t read_status = 0xFF;
 volatile uint8_t write_status = 0xFF;
 
-uint32_t Raw_Buffer[128]; // Сырой буфер ОЗУ для прерываний
-
 extern uint8_t data_available;
 extern uint8_t uart_cmd[4];
 
