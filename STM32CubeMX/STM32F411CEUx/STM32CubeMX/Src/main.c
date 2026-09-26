@@ -172,6 +172,14 @@ int main(void){
 	USART_SendString(USART1, test_msg);
 
 	if(sd_status == SD_CMD_OK){
+		sprintf(test_msg, "[SD Init] Card Type: 0x%02X\r\n", My_SD_Card.CardType);
+		USART_SendString(USART1, test_msg);
+
+		sprintf(test_msg, "[SD Init] Card Version: 0x%02X\r\n", My_SD_Card.CardVersion);
+		USART_SendString(USART1, test_msg);
+
+		sprintf(test_msg, "[SD Init] Class: 0x%02X\r\n", My_SD_Card.Class);
+		USART_SendString(USART1, test_msg);
 
 		sprintf(test_msg, "[SD Init] RCA: 0x%04X\r\n", My_SD_Card.Card_RCA);
 		USART_SendString(USART1, test_msg);
@@ -183,8 +191,19 @@ int main(void){
 		sprintf(test_msg, "[SD Init] CSD: 0x%08X %08X %08X %08X\r\n", Card_CSD[0], Card_CSD[1], Card_CSD[2], Card_CSD[3]);
 		USART_SendString(USART1, test_msg);
 
-					
+		sprintf(test_msg, "[SD Init] Block number: %d\r\n", My_SD_Card.BlockNbr);
+		USART_SendString(USART1, test_msg);
 
+		sprintf(test_msg, "[SD Init] Block Size: %d\r\n", My_SD_Card.BlockSize);
+		USART_SendString(USART1, test_msg);
+
+		sprintf(test_msg, "[SD Init] Card Speed: %d\r\n", My_SD_Card.CardSpeed);
+		USART_SendString(USART1, test_msg);
+
+		sprintf(test_msg, "[SD Init] Card capacity: %llu\r\n", (uint64_t)My_SD_Card.BlockNbr * (uint64_t)My_SD_Card.BlockSize);
+		USART_SendString(USART1, test_msg);
+
+					
 		sd_status = FAT_Mount(&SD_FAT);
 
 		sprintf(test_msg, "[FAT] Mount status: 0x%02X\r\n", sd_status);

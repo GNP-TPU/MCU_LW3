@@ -316,8 +316,74 @@ uint8_t SDIO_SendCommand_Polling(uint8_t cmd_index, uint32_t argument, uint8_t r
     return SD_CMD_OK; 
 }
 
+uint8_t SD_Get_Speed_Class_DMA(SD_Card_t* SD_Struct) {
+    uint8_t status;
+    uint32_t rca_arg = ((uint32_t)SD_Struct->Card_RCA << 16);
+
+    // 1. Сообщаем карте памяти о переходе (CMD55 + ACMD6)
+    status = SDIO_SendCommand_Polling(55, rca_arg, SDIO_RESP_SHORT);
+    if (status != SD_CMD_OK) return 0x99;
+
+    uint32_t buffer_out[16] = {0};
+    
+    SDIO->MASK = 0;   
+    
+    // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Тотально гасим автомат данных и триггер DMAEN.
+    // Даем шине AHB время разорвать старую связь со Стримом 6!
+    SDIO->DCTRL = 0; 
+    for(volatile int i = 0; i < 500; i++) { __NOP(); } // Пауза обязательна!
+    
+    SDIO->ICR = 0xFFFFFFFF;    
+    while (SDIO->STA & (SDIO_STA_TXACT | SDIO_STA_RXACT));
+
+    // 1. Отправляем команду чтения ACMD13 по Polling
+    status = SDIO_SendCommand_Polling(13, 0x00000000, SDIO_RESP_SHORT);
+    if (status != SD_CMD_OK) return 1;
+
+    // 2. СНАЧАЛА настраиваем параметры длины и таймаута блока данных
+    SDIO->DLEN = 64;          
+    SDIO->DTIMER = 0x00FFFFFF; 
+    SDIO->ICR = 0xFFFFFFFF; 
+
+    // 3. Предварительно настраиваем автомат данных SDIO на ПРИЕМ
+    SDIO->DCTRL = (6 << SDIO_DCTRL_DBLOCKSIZE_Pos) | SDIO_DCTRL_DTDIR | SDIO_DCTRL_DMAEN;
+
+    // 4. Включаем аппаратную перекачку DMA2_Stream3
+    SDIO_DMA_Config_RX(buffer_out);
+
+    // 5. Даем старт автомату данных SDIO
+    SDIO->DCTRL |= SDIO_DCTRL_DTEN;
+
+    // 6. СИНХРОНИЗАЦИЯ: Спокойно ждем физического окончания блока
+    while (!(SDIO->STA & (SDIO_STA_DBCKEND | SDIO_STA_DTIMEOUT | SDIO_STA_DCRCFAIL | SDIO_STA_RXOVERR)));
+
+    uint32_t sta_reg = SDIO->STA;
+    
+    // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: При выходе полностью обнуляем DCTRL
+    SDIO->DCTRL = 0; 
+    for(volatile int i = 0; i < 500; i++) { __NOP(); }
+    
+    DMA2->LIFCR = 0x0FC00000; // Очищаем Стрим 3
+    SDIO->ICR = 0xFFFFFFFF;
+
+    uint8_t raw_class = (uint8_t)(buffer_out[2] & 0xFF);
+
+    // Превращаем сырой байт спецификации в понятную цифру класса (2, 4, 6, 10)
+    if (raw_class == 0x00)      SD_Struct->Class = 0;  // Класс не определен
+    else if (raw_class == 0x01) SD_Struct->Class = 2;  // Class 2
+    else if (raw_class == 0x02) SD_Struct->Class = 4;  // Class 4
+    else if (raw_class == 0x03) SD_Struct->Class = 6;  // Class 6
+    else if (raw_class == 0x04) SD_Struct->Class = 10; // Class 10
+
+    return 0; 
+
+}
+
 uint8_t SD_Init_Card(SD_Card_t* SD_Struct) {
     uint8_t status;
+    uint32_t acmd41_arg = 0;
+
+    SD_Struct->CardType = SD_CARD_UNKNOWN;
 
     // 1. Посылаем CMD0 (Сброс). Ответ не нужен.
     status = SDIO_SendCommand_Polling(0, 0x00000000, SDIO_RESP_NONE);
@@ -328,14 +394,16 @@ uint8_t SD_Init_Card(SD_Card_t* SD_Struct) {
     // 2. Посылаем CMD8. Проверка паттерна 0xAA ОБЯЗАТЕЛЬНО идет с валидацией CRC (SDIO_RESP_SHORT)
     status = SDIO_SendCommand_Polling(8, 0x000001AA, SDIO_RESP_SHORT);
     if (status == SD_CMD_OK) {
+        // Карта ответила -> это V2! Проверяем эхо-паттерн.
         if ((SD_Response_Data[0] & 0xFF) != 0xAA) return 0x02; // Сбой паттерна
-        Card_Type = SD_CARD_V2_SC; 
+        
+        SD_Struct->CardType = SD_CARD_V2_SC; // Временно считаем V2_SC, в цикле уточним до HC
+        acmd41_arg = 0x40FF8000;             // Выставляем бит HCS (Бит 30) — поддержка высокой емкости
     } else {
-        return 0x03; // Карты нет или критический сбой физики шины
+        // Карта НЕ ответила -> это старая карта V1 (или шина совсем мертва, проверим в цикле)
+        SD_Struct->CardType = SD_CARD_V1;
+        acmd41_arg = 0x00FF8000;             // Бит HCS равен 0, старые карты его не поймут
     }
-
-    // 3. Цикл опроса готовности памяти (CMD55 + ACMD41)
-    uint32_t acmd41_arg = 0x00FF8000 | (1UL << 30); // Маска питания + поддержка SDHC
 
     volatile uint32_t retry = 500;
     while (retry > 0) {
@@ -346,7 +414,10 @@ uint8_t SD_Init_Card(SD_Card_t* SD_Struct) {
             if (status == SD_CMD_OK) {
                 // Если карта ответила (Busy бит 31 равен 1) — значит она проснулась!
                 if (SD_Response_Data[0] & (1UL << 31)) {
-                    if (SD_Response_Data[0] & (1UL << 30)) Card_Type = SD_CARD_V2_HC;
+                    if (SD_Response_Data[0] & (1UL << 30)) {
+                        SD_Struct->CardType = SD_CARD_V2_HC;
+                    }
+                    
                     break; 
                 }
             }
@@ -368,10 +439,21 @@ uint8_t SD_Init_Card(SD_Card_t* SD_Struct) {
             if(status == SD_CMD_OK){
                 status = SD_Enable_4Bit_Bus(SD_Struct);
 
+                
+
                 if(status == SD_CMD_OK){
                     SDIO_Switch_To_High_Speed();
 
-                    return SD_CMD_OK; // УСПЕХ!
+                    status = SD_Get_Speed_Class_DMA(SD_Struct);
+
+                    if(status == SD_CMD_OK){
+                        return SD_CMD_OK; // УСПЕХ!
+                    }
+                    else{
+                        return 0x09; 
+                    }
+
+                    
                 }
                 else{ return 0x08; }
             }
@@ -399,6 +481,8 @@ uint8_t SD_Get_Card_Address(SD_Card_t* SD_Struct) {
     SD_Struct->Card_CID[1] = SD_Response_Data[1];
     SD_Struct->Card_CID[2] = SD_Response_Data[2];
     SD_Struct->Card_CID[3] = SD_Response_Data[3];
+
+    SD_Struct->CardVersion = (SD_Struct->Card_CID[1] >> 24) & 0xFF;
 
     // 2. Отправляем CMD3 (Запрос RCA адреса). Аргумент = 0. Ответ = SHORT (R6)
     status = SDIO_SendCommand_Polling(3, 0x00000000, SDIO_RESP_SHORT);
@@ -444,6 +528,72 @@ uint8_t SD_Get_Card_CSD(SD_Card_t* SD_Struct) {
     Card_CSD[1] = SD_Response_Data[1];
     Card_CSD[2] = SD_Response_Data[2];
     Card_CSD[3] = SD_Response_Data[3];
+
+    uint8_t csd[16];
+    csd[0]  = (uint8_t)(Card_CSD[0] >> 24);
+    csd[1]  = (uint8_t)(Card_CSD[0] >> 16);
+    csd[2]  = (uint8_t)(Card_CSD[0] >> 8);
+    csd[3]  = (uint8_t)(Card_CSD[0]);
+    csd[4]  = (uint8_t)(Card_CSD[1] >> 24);
+    csd[5]  = (uint8_t)(Card_CSD[1] >> 16);
+    csd[6]  = (uint8_t)(Card_CSD[1] >> 8);
+    csd[7]  = (uint8_t)(Card_CSD[1]);
+    csd[8]  = (uint8_t)(Card_CSD[2] >> 24);
+    csd[9]  = (uint8_t)(Card_CSD[2] >> 16);
+    csd[10] = (uint8_t)(Card_CSD[2] >> 8);
+    csd[11] = (uint8_t)(Card_CSD[2]);
+    csd[12] = (uint8_t)(Card_CSD[3] >> 24);
+    csd[13] = (uint8_t)(Card_CSD[3] >> 16);
+    csd[14] = (uint8_t)(Card_CSD[3] >> 8);
+    csd[15] = (uint8_t)(Card_CSD[3]);
+
+    if (SD_Struct->CardType == SD_CARD_V2_HC) {
+        // --- ДЛЯ СОВРЕМЕННЫХ КАРТ ВЫСОКОЙ ЕМКОСТИ (SDHC/SDXC, как ваша на 16 ГБ) ---
+        
+        // Поле 6: Физический размер блока для карт высокой емкости жестко равен 512 байт
+        SD_Struct->BlockSize = 512;
+
+        // Поле 5: Вычисляем 22-битное поле Device Size (C_SIZE) по байтам вашего массива csd.
+        // Маской 0x3F забираем младшие 6 бит из csd[7], сдвигаем их и складываем с csd[8] и csd[9].
+        uint32_t c_size = ((uint32_t)(csd[7] & 0x3F) << 16) | 
+                          ((uint32_t)csd[8] << 8) | 
+                          ((uint32_t)csd[9]);
+        
+        // Официальная формула из спецификации SD v2.0: (C_SIZE + 1) * 1024
+        // Для ваших данных (c_size = 30000) это даст ровно 30 721 024 блоков (14.65 ГБ чистой емкости)
+        SD_Struct->BlockNbr = (c_size + 1) * 1024;
+    } 
+    else {
+        // --- ДЛЯ СТАРЫХ КАРТ STANDARD CAPACITY (V1 / V2_SC до 2 ГБ) ---
+        
+        // Поле Max. Read Data Block Length (READ_BL_LEN) находится в младших 4 битах csd[5]
+        uint32_t read_bl_len = csd[5] & 0x0F;
+        
+        // Поле 6: Физический размер блока равен 2^READ_BL_LEN
+        SD_Struct->BlockSize = 1UL << read_bl_len;
+
+        // Извлекаем 12-битное поле C_SIZE для старых карт из байт csd[6], csd[7] и csd[8]
+        uint32_t c_size = ((uint32_t)(csd[6] & 0x03) << 10) | 
+                          ((uint32_t)csd[7] << 2) | 
+                          ((uint32_t)(csd[8] >> 6) & 0x03);
+                          
+        // Извлекаем 3-битное поле C_SIZE_MULT из битов csd[9] и csd[10]
+        uint32_t c_size_mult = ((uint32_t)(csd[9] & 0x03) << 1) | 
+                               ((uint32_t)(csd[10] >> 7) & 0x01);
+
+        // Поле 5: Вычисляем количество блоков по формуле спецификации v1.0
+        uint32_t mult = 1UL << (c_size_mult + 2);
+        SD_Struct->BlockNbr = (c_size + 1) * mult;
+
+        // Коррекция: если физический блок равен 1024 байта, пересчитываем 
+        // объем в стандартные 512-байтовые блоки для совместимости с FAT-драйверами
+        if (SD_Struct->BlockSize == 1024) {
+            SD_Struct->BlockNbr *= 2;
+            SD_Struct->BlockSize = 512;
+        }
+    }
+
+    SD_Struct->CardSpeed = csd[3];
 
     return SD_CMD_OK; // Успех! CSD успешно прочитан.
 }
