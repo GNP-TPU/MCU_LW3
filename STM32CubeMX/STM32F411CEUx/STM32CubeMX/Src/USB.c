@@ -744,13 +744,35 @@ void OTG_FS_IRQHandler(void) {
                                     }
                                 }
                                 else if (msc_scsi_cmd == 0x23) { // READ_FORMAT_CAPACITIES
-                                    __ALIGN4 static const uint8_t format_cap_data[12] = {
-                                        0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x20, 0x00, 0x02, 0x00, 0x02, 0x00        
-                                    };
+                                    __ALIGN4 static uint8_t format_cap_data[12];
+                                    uint32_t total_lba = STORAGE_SECTOR_NBR; 
+                                    uint32_t blk_size  = STORAGE_SECTOR_SIZE;     
+                                    
+                                    // 1. Заголовок (4 байта): зарезервировано + длина списка дескрипторов (8 байт)
+                                    format_cap_data[0] = 0x00;
+                                    format_cap_data[1] = 0x00;
+                                    format_cap_data[2] = 0x00;
+                                    format_cap_data[3] = 0x08; // Длина дескриптора емкости
+                                    
+                                    // 2. Количество блоков (4 байта в формате Big-Endian)
+                                    format_cap_data[4] = (total_lba >> 24) & 0xFF; 
+                                    format_cap_data[5] = (total_lba >> 16) & 0xFF;
+                                    format_cap_data[6] = (total_lba >> 8)  & 0xFF;  
+                                    format_cap_data[7] = total_lba         & 0xFF;
+                                    
+                                    // 3. Код дескриптора (0x02 - форматированный диск)
+                                    format_cap_data[8] = 0x02; 
+                                    
+                                    // 4. Размер блока (3 байта в формате Big-Endian)
+                                    format_cap_data[9]  = (blk_size >> 16) & 0xFF;
+                                    format_cap_data[10] = (blk_size >> 8)  & 0xFF;  
+                                    format_cap_data[11] = blk_size         & 0xFF;
+
                                     uint32_t len = (msc_remaining_bytes < 12) ? msc_remaining_bytes : 12;
                                     msc_remaining_bytes -= len;
-                                    USB_EP_Tx(1, format_cap_data, len);
-                                    msc_remaining_bytes = 0; 
+
+                                    msc_remaining_bytes = 0;
+                                    USB_EP_Tx(1, format_cap_data, 12);
                                 }
                                 else if (msc_scsi_cmd == 0x25) { // READ_CAPACITY_10
                                     __ALIGN4 static uint8_t cap_data[8];

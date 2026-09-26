@@ -248,7 +248,7 @@ typedef struct {
 #define MEDIA_BROWSER_HOME   0x04 
 //====================================================================================================
 
-#define STORAGE_SECTOR_NBR      8192     // 8192 сектора по 512 байт = 4 МБ виртуального диска
+#define STORAGE_SECTOR_NBR      8192   // 32768     // 8192 сектора по 512 байт = 4 МБ виртуального диска
 #define STORAGE_SECTOR_SIZE     512
 
 void MSC_Send_CSW(uint8_t status);

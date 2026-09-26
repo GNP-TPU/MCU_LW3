@@ -150,6 +150,9 @@ volatile uint8_t write_status = 0xFF;
 extern uint8_t data_available;
 extern uint8_t uart_cmd[4];
 
+char test_msg[128];
+uint8_t file_buffer[54];
+
 int main(void){
 	RCC_Configure();
 	GPIO_Configure();
@@ -161,7 +164,7 @@ int main(void){
 	SD_FAT.DiskRead 	= SD_Read_For_FAT;
 	SD_FAT.DiskWrite 	= SD_Write_For_FAT;
 
-	char test_msg[128];
+	
 
 	USART_SendString(USART1, "\r\n");
 	uint8_t sd_status = SD_Init_Card(&My_SD_Card);
@@ -225,23 +228,28 @@ int main(void){
 
 		if(sd_status){
 
-			sd_status = FAT_OpenFile(&SD_FAT, "My_BMP_File.bmp");
+			sd_status = FAT_OpenFile(&SD_FAT, "SomeFileOnSD.txt");
 
 			sprintf(test_msg, "[FAT] File open status: %d\r\n", sd_status);
 			USART_SendString(USART1, test_msg);
 
-			sprintf(test_msg, "[FAT] FAT Table start sector: %d\r\n", SD_FAT.RootDirectory_StartSector);
+			sprintf(test_msg, "[FAT] Root directory start sector: %d\r\n", SD_FAT.RootDirectory_StartSector);
 			USART_SendString(USART1, test_msg);
 
+			
 
 			if(sd_status){
-				uint8_t file_buffer[54];
-				sd_status = FAT_ReadFile(&SD_FAT, file_buffer, 0, 54);
+				
+				sd_status = FAT_ReadFile(&SD_FAT, file_buffer, 0, 26);
 
 				sprintf(test_msg, "[FAT] File Read: %d\r\n", sd_status);
 				USART_SendString(USART1, test_msg);
 
+				sprintf(test_msg, "[FAT] File Read: %.26s\r\n", file_buffer);
+				USART_SendString(USART1, test_msg);
+
 				if(sd_status){
+					/*
 					BMP_Header_t bmp;
 					memcpy(&bmp, file_buffer, sizeof(BMP_Header_t));
 
@@ -289,6 +297,7 @@ int main(void){
 					USART_SendString(USART1, log_buf);
 
 					USART_SendString(USART1, "====================================\r\n");
+					*/
 				}
 			}
 		}
