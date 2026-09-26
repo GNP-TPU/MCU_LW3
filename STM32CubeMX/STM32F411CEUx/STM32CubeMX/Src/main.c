@@ -204,7 +204,7 @@ int main(void){
 		sprintf(test_msg, "[SD Init] Card capacity: %llu\r\n", (uint64_t)My_SD_Card.BlockNbr * (uint64_t)My_SD_Card.BlockSize);
 		USART_SendString(USART1, test_msg);
 
-					
+			
 		sd_status = FAT_Mount(&SD_FAT);
 
 		sprintf(test_msg, "[FAT] Mount status: 0x%02X\r\n", sd_status);
@@ -240,12 +240,12 @@ int main(void){
 
 			if(sd_status){
 				
-				sd_status = FAT_ReadFile(&SD_FAT, file_buffer, 0, 26);
+				sd_status = FAT_ReadFile(&SD_FAT, file_buffer, 0, 30);
 
 				sprintf(test_msg, "[FAT] File Read: %d\r\n", sd_status);
 				USART_SendString(USART1, test_msg);
 
-				sprintf(test_msg, "[FAT] File Read: %.26s\r\n", file_buffer);
+				sprintf(test_msg, "[FAT] File Read: %.30s\r\n", file_buffer);
 				USART_SendString(USART1, test_msg);
 
 				if(sd_status){
