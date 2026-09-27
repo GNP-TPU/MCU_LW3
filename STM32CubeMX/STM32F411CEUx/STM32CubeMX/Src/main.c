@@ -1,0 +1,485 @@
+//====================================================================================================
+#include "main.h"
+//====================================================================================================
+void RCC_Configure(void);
+void GPIO_Configure(void);
+void SPI_Configure(void);
+void USART_Configure(void);
+//====================================================================================================
+USART_InitTypeDef				USART_PC;
+SPI_InitTypeDef 				SPI_W25Q;
+SPI_InitTypeDef 				SPI_ST7735;
+
+SD_Card_t 						My_SD_Card;
+
+char USART_OutBuf[2048];
+//====================================================================================================
+void __FLASH_SPI_Select(bool select){
+	if(select) GPIO_Pin_Low(GPIOA, GPIO_PIN_4);
+	else GPIO_Pin_High(GPIOA, GPIO_PIN_4);
+}
+
+void __FLASH_SPI_Write(uint8_t byte){
+	SPI_Transmit_Byte(SPI1, byte);
+}
+
+uint8_t __FLASH_SPI_Read(void){
+	return SPI_Receive_Byte(SPI1);
+}
+
+W25Q_t MyFlash = {
+	.W25Q_Select 	= __FLASH_SPI_Select,
+	.W25Q_SPI_Write = __FLASH_SPI_Write,
+	.W25Q_SPI_Read 	= __FLASH_SPI_Read
+};
+//====================================================================================================
+extern volatile uint8_t  msc_write_request;
+extern volatile uint32_t msc_write_lba;  
+
+extern volatile uint8_t  msc_read_request;
+extern volatile uint32_t msc_requested_lba;
+
+extern volatile uint8_t  msc_scsi_cmd;
+
+extern volatile uint32_t msc_remaining_bytes;
+extern __ALIGN4 uint8_t msc_sector_buffer[1024];
+
+__ALIGN4 static uint8_t flash_cache_buffer[4096]; 
+
+void USB_MSC_Background_Process(void) {
+	// Логика чтения
+    if (msc_read_request) {
+        SDIO->MASK = 0; 
+        SDIO->ICR = 0xFFFFFFFF;
+
+        uint8_t sd_status = SDIO_ReadBlock_DMA(&My_SD_Card, msc_requested_lba, (uint32_t*)msc_sector_buffer);
+        
+        if (sd_status != 0) {
+            // Ошибка чтения — глушим буфер нулями
+            for (uint16_t i = 0; i < STORAGE_SECTOR_SIZE; i++) {
+                msc_sector_buffer[i] = 0x00;
+            }
+        }
+
+        msc_read_request = 0;
+
+        uint32_t chunk = (msc_remaining_bytes > 64) ? 64 : msc_remaining_bytes;
+        msc_remaining_bytes -= chunk;
+        USB_EP_Tx(1, msc_sector_buffer, chunk); 
+    }
+	// Логика записи
+    if (msc_write_request) {
+		volatile uint8_t write_status = SDIO_WriteBlock_DMA(&My_SD_Card, msc_write_lba, (uint32_t*)msc_sector_buffer);
+
+        msc_write_request = 0;
+
+        if (msc_remaining_bytes == 0) {
+			delay_ms(50);
+
+            msc_scsi_cmd = 0;
+            MSC_Send_CSW(0); 
+            
+            // Перевзводим точку на ожидание новой команды CBW
+            EP1_OUT->DOEPTSIZ = (1U << USB_OTG_DOEPTSIZ_PKTCNT_Pos) | (64 << USB_OTG_DOEPTSIZ_XFRSIZ_Pos);
+            EP1_OUT->DOEPCTL |= USB_OTG_DOEPCTL_EPENA | USB_OTG_DOEPCTL_CNAK;
+        } 
+        else {
+			
+            // Перевзводим точку OUT на прием следующего пакета данных секторов
+            EP1_OUT->DOEPTSIZ = (1U << USB_OTG_DOEPTSIZ_PKTCNT_Pos) | (64 << USB_OTG_DOEPTSIZ_XFRSIZ_Pos);
+            EP1_OUT->DOEPCTL |= USB_OTG_DOEPCTL_EPENA | USB_OTG_DOEPCTL_CNAK;
+        }
+    }
+}
+//====================================================================================================
+
+void __ST7735_SPI_CS(bool state){
+	if(state) GPIO_Pin_High(GPIOB, GPIO_PIN_14);
+	else GPIO_Pin_Low(GPIOB, GPIO_PIN_14);
+}
+
+void __ST7735_SPI_DC(bool state){
+	if(state) GPIO_Pin_High(GPIOA, GPIO_PIN_3);
+	else GPIO_Pin_Low(GPIOA, GPIO_PIN_3);
+}
+
+void __ST7735_SPI_RST(bool state){
+	if(state) GPIO_Pin_High(GPIOA, GPIO_PIN_2);
+	else GPIO_Pin_Low(GPIOA, GPIO_PIN_2);
+}
+
+void __ST7735_SPI_Write(uint8_t byte){
+	SPI_Transmit_Byte(SPI2, byte);
+}
+
+ST77xx_t MyDisplay = {
+	.ST77xx_CS 			= __ST7735_SPI_CS,
+	.ST77xx_DC 			= __ST7735_SPI_DC,
+	.ST77xx_RST 		= __ST7735_SPI_RST,
+	.ST77xx_SPI_Write 	= __ST7735_SPI_Write,
+};
+//====================================================================================================
+FATmini_t SD_FAT;
+
+void SD_Read_For_FAT(uint32_t sector_address, uint8_t* buffer) {
+    SDIO_ReadBlock_DMA(&My_SD_Card, sector_address, (uint32_t*)buffer);
+}
+
+void SD_Write_For_FAT(uint32_t sector_address, uint8_t* buffer) {
+	SDIO_WriteBlock_DMA(&My_SD_Card, sector_address, (uint32_t*)buffer);
+}
+
+BMP_Header_t bmp_info;
+uint8_t row_buffer[300];
+
+extern volatile uint32_t Card_CSD[4]; 
+
+
+__attribute__((aligned(4))) uint32_t Sector_Buffer[128] = {0};
+volatile uint8_t read_status = 0xFF;
+volatile uint8_t write_status = 0xFF;
+
+extern uint8_t data_available;
+extern uint8_t uart_cmd[4];
+
+char test_msg[128];
+uint8_t file_buffer[54];
+
+// 20 пикселей * 3 байта = 60 байт цвета
+uint8_t black_row[60];
+uint8_t red_row[60];
+uint8_t green_row[60];
+
+// Исходные данные BMP
+uint32_t PixelOffset = 138;
+uint32_t RowSize = 300; // 100 px * 3 bytes
+
+// Параметры геометрии
+uint32_t SquareSize = 20; 
+uint32_t ImageWidth = 100;
+uint32_t ImageHeight = 100;
+
+int main(void){
+	RCC_Configure();
+	GPIO_Configure();
+	SPI_Configure();
+	USART_Configure();
+
+	SDIO_Init();
+
+	SD_FAT.DiskRead 	= SD_Read_For_FAT;
+	SD_FAT.DiskWrite 	= SD_Write_For_FAT;
+
+	
+
+	USART_SendString(USART1, "\r\n");
+	uint8_t sd_status = SD_Init_Card(&My_SD_Card);
+
+	sprintf(test_msg, "[SD Init] Init Status: 0x%02X\r\n", sd_status);
+	USART_SendString(USART1, test_msg);
+
+	if(sd_status == SD_CMD_OK){
+		sprintf(test_msg, "[SD Init] Card Type: 0x%02X\r\n", My_SD_Card.CardType);
+		USART_SendString(USART1, test_msg);
+
+		sprintf(test_msg, "[SD Init] Card Version: 0x%02X\r\n", My_SD_Card.CardVersion);
+		USART_SendString(USART1, test_msg);
+
+		sprintf(test_msg, "[SD Init] Class: 0x%02X\r\n", My_SD_Card.Class);
+		USART_SendString(USART1, test_msg);
+
+		sprintf(test_msg, "[SD Init] RCA: 0x%04X\r\n", My_SD_Card.Card_RCA);
+		USART_SendString(USART1, test_msg);
+
+		sprintf(test_msg, "[SD Init] CID: 0x%08X %08X %08X %08X\r\n", My_SD_Card.Card_CID[0], 
+			My_SD_Card.Card_CID[1], My_SD_Card.Card_CID[2], My_SD_Card.Card_CID[3]);
+		USART_SendString(USART1, test_msg);
+
+		sprintf(test_msg, "[SD Init] CSD: 0x%08X %08X %08X %08X\r\n", Card_CSD[0], Card_CSD[1], Card_CSD[2], Card_CSD[3]);
+		USART_SendString(USART1, test_msg);
+
+		sprintf(test_msg, "[SD Init] Block number: %d\r\n", My_SD_Card.BlockNbr);
+		USART_SendString(USART1, test_msg);
+
+		sprintf(test_msg, "[SD Init] Block Size: %d\r\n", My_SD_Card.BlockSize);
+		USART_SendString(USART1, test_msg);
+
+		sprintf(test_msg, "[SD Init] Card Speed: %d\r\n", My_SD_Card.CardSpeed);
+		USART_SendString(USART1, test_msg);
+
+		sprintf(test_msg, "[SD Init] Card capacity: %llu\r\n", (uint64_t)My_SD_Card.BlockNbr * (uint64_t)My_SD_Card.BlockSize);
+		USART_SendString(USART1, test_msg);
+
+			
+		sd_status = FAT_Mount(&SD_FAT);
+
+		sprintf(test_msg, "[FAT] Mount status: 0x%02X\r\n", sd_status);
+		USART_SendString(USART1, test_msg);
+
+		sprintf(test_msg, "[FAT] Sign: 0x%04X\r\n", SD_FAT.Sign);
+		USART_SendString(USART1, test_msg);
+
+		sprintf(test_msg, "[FAT] Bytes per Sector: %u\r\n", SD_FAT.BytesPerSector);
+		USART_SendString(USART1, test_msg);
+
+		sprintf(test_msg, "[FAT] Sectors per Cluster: %u\r\n", SD_FAT.SectorsPerCluster);
+		USART_SendString(USART1, test_msg);
+
+		sprintf(test_msg, "[FAT] Count Of Clusters: %u\r\n", SD_FAT.CountOfClusters);
+		USART_SendString(USART1, test_msg);
+
+		sprintf(test_msg, "[FAT] FAT Type: %s\r\n", SD_FAT.FAT_Type_String);
+		USART_SendString(USART1, test_msg);
+
+
+		if(sd_status){
+
+			sd_status = FAT_OpenFile(&SD_FAT, "My_BMP_File.bmp");
+
+			sprintf(test_msg, "[FAT] File open status: %d\r\n", sd_status);
+			USART_SendString(USART1, test_msg);
+
+			sprintf(test_msg, "[FAT] Root directory start sector: %d\r\n", SD_FAT.RootDirectory_StartSector);
+			USART_SendString(USART1, test_msg);
+
+			
+
+			if(sd_status){
+				
+				for (int i = 0; i < 60; i += 3) {
+					green_row[i]     = 0x00; // Blue
+					green_row[i + 1] = 0xFF; // Green
+					green_row[i + 2] = 0xFF; // Red
+				}
+				
+				uint32_t X_Offset_Bytes = (ImageWidth - SquareSize) * 3; // (100 - 20) * 3 = 240 байт
+
+				for (uint32_t y = 0; y < SquareSize; y++) {
+					
+					// Смещение заголовка + (Номер строки * Длина строки) + Сдвиг к правому краю
+					uint32_t StartByte = PixelOffset + (y * RowSize) + X_Offset_Bytes;
+					
+					FAT_ModifyFile(&SD_FAT, green_row, StartByte, sizeof(green_row));
+				}
+			    
+				/*
+				for (int i = 0; i < 60; i += 3) {
+					red_row[i]     = 0x00; // Blue
+					red_row[i + 1] = 0x00; // Green
+					red_row[i + 2] = 0xFF; // Red
+				}
+
+				// Вычисляем стартовую строку и стартовый пиксель для центра
+				uint32_t StartY = (ImageHeight / 2) - (SquareSize / 2); // (100/2) - (20/2) = 40
+				uint32_t StartX = (ImageWidth / 2) - (SquareSize / 2);  // (100/2) - (20/2) = 40
+
+				// Переводим стартовый пиксель X в смещение в байтах от начала строки
+				uint32_t X_Offset_Bytes = StartX * 3; // 40 * 3 = 120 байт
+
+				for (uint32_t y = StartY; y < (StartY + SquareSize); y++) {
+					
+					// Смещение пикселей + Смещение до нужной строки + Сдвиг к центру строки
+					uint32_t StartByte = PixelOffset + (y * RowSize) + X_Offset_Bytes;
+					
+					FAT_ModifyFile(&SD_FAT, red_row, StartByte, sizeof(red_row));
+				}
+				
+				
+				for (uint32_t y = ImageHeight - SquareSize; y < ImageHeight; y++) {
+    
+					uint32_t StartByte = PixelOffset + (y * RowSize);
+					
+					bool res = FAT_ModifyFile(&SD_FAT, black_row, StartByte, sizeof(black_row));
+					
+				}
+				
+				sd_status = FAT_ReadFile(&SD_FAT, file_buffer, 0, 54);
+
+				sprintf(test_msg, "[FAT] File Read: %d\r\n", sd_status);
+				USART_SendString(USART1, test_msg);
+
+				if(sd_status){
+					
+					BMP_Header_t bmp;
+					memcpy(&bmp, file_buffer, sizeof(BMP_Header_t));
+
+					char log_buf[128]; 
+
+					USART_SendString(USART1, "\r\n========= BMP FILE HEADER =========\r\n");
+
+					// 1. Сигнатура
+					sprintf(log_buf, " Signature:    %c%c (0x%04X)\r\n", 
+								(char)(bmp.bfType & 0xFF), (char)(bmp.bfType >> 8), bmp.bfType);
+					USART_SendString(USART1, log_buf);
+
+					// 2. Размеры и смещения
+					sprintf(log_buf, " File Size:    %lu bytes\r\n", (unsigned long)bmp.bfSize);
+					USART_SendString(USART1, log_buf);
+
+					sprintf(log_buf, " Pixel Offset: %lu bytes\r\n", (unsigned long)bmp.bfOffBits);
+					USART_SendString(USART1, log_buf);
+
+					USART_SendString(USART1, "--------- BITMAPINFOHEADER ---------\r\n");
+
+					// 3. Геометрия изображения
+					sprintf(log_buf, " Header Size:  %lu bytes\r\n", (unsigned long)bmp.biSize);
+					USART_SendString(USART1, log_buf);
+
+					sprintf(log_buf, " Width:        %lu px\r\n", (unsigned long)bmp.biWidth);
+					USART_SendString(USART1, log_buf);
+
+					sprintf(log_buf, " Height:       %ld px %s\r\n", 
+						(long)(int32_t)bmp.biHeight, 
+						((int32_t)bmp.biHeight < 0) ? "(Top-Down)" : "(Bottom-Up)");
+					USART_SendString(USART1, log_buf);
+
+					// 4. Глубина цвета и сжатие
+					sprintf(log_buf, " Bit Count:    %u bpp (Bits Per Pixel)\r\n", bmp.biBitCount);
+					USART_SendString(USART1, log_buf);
+
+					sprintf(log_buf, " Compression:  %lu %s\r\n", 
+						(unsigned long)bmp.biCompression, 
+						(bmp.biCompression == 0) ? "(None / BI_RGB)" : "(Compressed!)");
+					USART_SendString(USART1, log_buf);
+
+					sprintf(log_buf, " Image Size:   %lu bytes (Pixel Data)\r\n", (unsigned long)bmp.biSizeImage);
+					USART_SendString(USART1, log_buf);
+
+					USART_SendString(USART1, "====================================\r\n");
+				}
+				*/
+				
+			}
+		}
+	}
+	else{
+		sprintf(test_msg, "[SD Init] Initialization failed!");
+		USART_SendString(USART1, test_msg);
+	}
+
+	USB_Core_Init();
+	
+	while(1){
+		USB_MSC_Background_Process();
+	}
+
+}
+
+
+//====================================================================================================
+void RCC_Configure(void){
+	RCC_InitTypeDef 	RCC_InitStruct;
+	
+	RCC_InitStruct.ManualCalculatePLL			= false;
+	
+	RCC_InitStruct.OscillatorType				= OSC_EXTERNAL;	
+	RCC_InitStruct.SystemClockSource			= PLL_CLK_SRC;
+	
+	RCC_InitStruct.ExternalOscillatorFreq 		= 25000000;
+	
+	RCC_InitStruct.AHB_Prescaler				= AHB_PRESCALER_DIV1;
+	RCC_InitStruct.APB1_Prescaler				= APB_PRESCALER_DIV2;
+	RCC_InitStruct.APB2_Prescaler				= APB_PRESCALER_DIV1;
+		
+	RCC_InitStruct.PLL_M_Divider				= 25;
+	RCC_InitStruct.PLL_N_Multiplier				= 192;
+	RCC_InitStruct.PLL_P_Divider				= PLL_P_DIV2;
+	RCC_InitStruct.PLL_Q_Divider				= 4;
+	
+	SystemCoreClockConfigure(&RCC_InitStruct);
+}
+
+void GPIO_Configure(void){
+	GPIO_InitTypeDef GPIO_InitStruct;
+
+	// SDIO
+	GPIO_InitStruct.Pin 		= GPIO_PIN_6 | GPIO_PIN_8 | GPIO_PIN_9;									
+	GPIO_InitStruct.Mode 		= MODE_AF;
+	GPIO_InitStruct.Type 		= TYPE_PP;
+	GPIO_InitStruct.Speed 		= GPIO_SPEED_FREQ_VERY_HIGH;
+	GPIO_InitStruct.Alternate	= AF_SDIO;
+	GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+	GPIO_InitStruct.Pin 		= GPIO_PIN_4;									
+	GPIO_InitStruct.Mode 		= MODE_AF;
+	GPIO_InitStruct.Type 		= TYPE_PP;
+	GPIO_InitStruct.Speed 		= GPIO_SPEED_FREQ_VERY_HIGH;
+	GPIO_InitStruct.Alternate	= AF_SDIO;
+	GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+	GPIO_InitStruct.Pin 		= GPIO_PIN_5;									
+	GPIO_InitStruct.Mode 		= MODE_AF;
+	GPIO_InitStruct.Type 		= TYPE_PP;
+	GPIO_InitStruct.Speed 		= GPIO_SPEED_FREQ_VERY_HIGH;
+	GPIO_InitStruct.Alternate	= AF_SDIO;
+	GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+	GPIO_InitStruct.Pin 		= GPIO_PIN_15;									
+	GPIO_InitStruct.Mode 		= MODE_AF;
+	GPIO_InitStruct.Type 		= TYPE_PP;
+	GPIO_InitStruct.Speed 		= GPIO_SPEED_FREQ_VERY_HIGH;
+	GPIO_InitStruct.Alternate	= AF_SDIO;
+	GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+	/*
+	// SPI ST7735
+	GPIO_InitStruct.Pin 		= GPIO_PIN_13 | GPIO_PIN_15;									
+	GPIO_InitStruct.Mode 		= MODE_AF;
+	GPIO_InitStruct.Type 		= TYPE_PP;
+	GPIO_InitStruct.Speed 		= GPIO_SPEED_FREQ_VERY_HIGH;
+	GPIO_InitStruct.Alternate	= AF_SPI2;
+	GPIO_Init(GPIOB, &GPIO_InitStruct);
+	
+
+	// SPI ST7735 CS
+	GPIO_InitStruct.Pin 			= GPIO_PIN_14;
+	GPIO_InitStruct.Mode 			= MODE_OUTPUT;
+	GPIO_InitStruct.Type 			= TYPE_PP;
+	GPIO_InitStruct.Speed 			= GPIO_SPEED_FREQ_VERY_HIGH;
+	GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+	// SPI ST7735 RST & DC
+	GPIO_InitStruct.Pin 			= GPIO_PIN_2 | GPIO_PIN_3;
+	GPIO_InitStruct.Mode 			= MODE_OUTPUT;
+	GPIO_InitStruct.Type 			= TYPE_PP;
+	GPIO_InitStruct.Speed 			= GPIO_SPEED_FREQ_VERY_HIGH;
+	GPIO_Init(GPIOA, &GPIO_InitStruct);
+	*/
+	
+	// UART
+	GPIO_InitStruct.Pin 			= GPIO_PIN_6 | GPIO_PIN_7;
+	GPIO_InitStruct.Mode 			= MODE_AF;
+	GPIO_InitStruct.Type 			= TYPE_PP;
+	GPIO_InitStruct.Speed 		= GPIO_SPEED_FREQ_VERY_HIGH;
+	GPIO_InitStruct.Alternate	= AF_USART1;
+	GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+	// USB (PA11(DM), PA12(DP))
+	
+	GPIO_InitStruct.Pin 			= GPIO_PIN_11 | GPIO_PIN_12;	
+	GPIO_InitStruct.Mode 			= MODE_AF;
+	GPIO_InitStruct.Type 			= TYPE_PP;
+	GPIO_InitStruct.Speed 		= GPIO_SPEED_FREQ_VERY_HIGH;
+	GPIO_InitStruct.Alternate	= AF_USB_OTG_FS;
+	GPIO_Init(GPIOA, &GPIO_InitStruct);
+	
+	
+}
+
+void SPI_Configure(void){
+	SPI_ST7735.Baudrate_Prescaler = SPI_BAUDRATE_DIV16;
+	SPI_Init(SPI2, &SPI_ST7735);
+}
+
+void USART_Configure(void){
+	USART_PC.Baudrate = 115200;
+	
+	USART_PC.Rx_Enable = true;
+	USART_PC.Tx_Enable = true;
+	
+	USART_PC.Rx_IRq_Enable = true;
+	
+	USART_Init(USART1, &USART_PC);
+}
+//====================================================================================================
+
